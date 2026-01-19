@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="description" content="Manor Lakes Football Club – Weekly match availability and stats tracker" />
+
+  <title>Manor Lakes Football Club</title>
+
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" href="./assets/icons/favicon.png" />
+<link rel="manifest" href="./manifest.json" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="apple-touch-icon" href="./assets/icons/icon-192.png" />
+
+
+</head>
+<body>
+      <!-- Global Loading Bar -->
+  <div id="loadingbar" class="loadingbar" aria-hidden="true">
+    <div class="loadingbar__fill"></div>
+  </div>
+
+  <!-- Top App Bar -->
+  <header class="appbar">
+    <div class="appbar__left">
+      <div class="brand">
+        <div class="brand__mark" aria-hidden="true">ML</div>
+        <div class="brand__text">
+          <div class="brand__title">Manor Lakes Football Club</div>
+          <div class="brand__subtitle">Availability • Teams • Ratings</div>
+        </div>
+      </div>
+    </div>
+
+    <nav class="tabs" aria-label="Primary navigation">
+      <a class="tab" href="#/match" data-tab="match">Match</a>
+      <a class="tab" href="#/register" data-tab="register">Register</a>
+      <a class="tab" href="#/leaderboard" data-tab="leaderboard">Leaderboard</a>
+      <a class="tab" href="#/admin" data-tab="admin">Admin</a>
+    </nav>
+  </header>
+
+  <!-- Main -->
+  <main class="shell">
+    <div class="container">
+      <div id="app"></div>
+    </div>
+  </main>
+
+  <!-- Bottom Nav (mobile) -->
+  <nav class="bottomnav" aria-label="Bottom navigation">
+    <a class="bottomnav__item" href="#/match">
+      <span class="bottomnav__icon" aria-hidden="true">⚽</span>
+      <span class="bottomnav__label">Match</span>
+    </a>
+    <a class="bottomnav__item" href="#/register">
+      <span class="bottomnav__icon" aria-hidden="true">📝</span>
+      <span class="bottomnav__label">Register</span>
+    </a>
+    <a class="bottomnav__item" href="#/leaderboard">
+      <span class="bottomnav__icon" aria-hidden="true">🏆</span>
+      <span class="bottomnav__label">Ranks</span>
+    </a>
+    <a class="bottomnav__item" href="#/admin">
+      <span class="bottomnav__icon" aria-hidden="true">🛠️</span>
+      <span class="bottomnav__label">Admin</span>
+    </a>
+  </nav>
+  <!-- Toasts -->
+  <div id="toastHost" class="toastHost" aria-live="polite" aria-atomic="true"></div>
+
+  <script type="module">
+    // Simple active-tab highlight (works for both top tabs + bottom nav)
+    function setActive() {
+      const hash = location.hash || "#/match";
+      const path = hash.split("?")[0];
+
+      document.querySelectorAll("[data-tab]").forEach(a => {
+        a.classList.toggle("tab--active", a.getAttribute("href") === path);
+      });
+
+      document.querySelectorAll(".bottomnav__item").forEach(a => {
+        a.classList.toggle("bottomnav__item--active", a.getAttribute("href") === path);
+      });
+    }
+    window.addEventListener("hashchange", setActive);
+    setActive();
+  </script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+    });
+  }
+</script>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
