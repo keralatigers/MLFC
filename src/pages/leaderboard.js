@@ -1,11 +1,30 @@
 import { API } from "../api/endpoints.js";
-import { toastError, toastSuccess } from "../ui/toast.js";
+import { toastError, toastSuccess, toastInfo } from "../ui/toast.js";
+import { cleanupCaches } from "../cache_cleanup.js";
+
+const LS_LEADERBOARD_KEY = "mlfc_leaderboard_cache_v1";
+// You said “manual refresh”; keep cache long.
+const LEADERBOARD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function currentPath() {
   return (location.hash || "#/match").split("?")[0];
 }
 
-function renderFromData(root, data) {
+function lsGet(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+function lsDel(key) {
+  try { localStorage.removeItem(key); } catch {}
+}
+function isFresh(entry, ttlMs) {
+  if (!entry?.ts) return false;
+  return (Date.now() - entry.ts) <= ttlMs;
+}
+
+function renderFromData(root, data, { cacheNote = "" } = {}) {
   const topScorers = (data.topScorers || []).slice(0, 10);
   const topAssists = (data.topAssists || []).slice(0, 10);
   const bestPlayers = (data.bestPlayers || []).slice(0, 10); // show even if 1 rating
@@ -13,9 +32,11 @@ function renderFromData(root, data) {
   root.innerHTML = `
     <div class="card">
       <div class="h1">Leaderboards</div>
-      <div class="small">Tap refresh when you want. No background reload.</div>
+      <div class="small">Cached on your device. Tap Refresh when you want.</div>
+      ${cacheNote ? `<div class="small" style="margin-top:6px">${cacheNote}</div>` : ""}
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="refresh">Refresh</button>
+        <button class="btn gray" id="clearCache">Clear cache</button>
       </div>
       <div class="small" id="msg" style="margin-top:8px"></div>
     </div>
@@ -48,44 +69,72 @@ function renderFromData(root, data) {
     </div>
   `;
 
-  const refreshBtn = root.querySelector("#refresh");
-  refreshBtn.onclick = () => loadAndRender(root, true);
+  // Bind buttons
+  root.querySelector("#refresh").onclick = () => refreshLeaderboard(root);
+  root.querySelector("#clearCache").onclick = () => {
+    lsDel(LS_LEADERBOARD_KEY);
+    toastInfo("Leaderboard cache cleared.");
+    // Re-render minimal state
+    renderEmpty(root, "Cache cleared. Tap Refresh to load.");
+  };
 }
 
-async function loadAndRender(root, showToast) {
-  const routeAtStart = currentPath();
-  const stillHere = () => currentPath() === routeAtStart;
-
-  const msg = root.querySelector("#msg");
-  const btn = root.querySelector("#refresh");
-  if (btn) btn.disabled = true;
-  if (msg) msg.textContent = "Loading…";
-
-  const data = await API.leaderboard();
-  if (!stillHere()) return;
-
-  if (btn) btn.disabled = false;
-
-  if (!data.ok) {
-    if (msg) msg.textContent = data.error || "Failed";
-    toastError(data.error || "Failed to load leaderboard");
-    return;
-  }
-
-  renderFromData(root, data);
-  if (showToast) toastSuccess("Leaderboards refreshed.");
-}
-
-export async function renderLeaderboardPage(root) {
+function renderEmpty(root, note) {
   root.innerHTML = `
     <div class="card">
       <div class="h1">Leaderboards</div>
-      <div class="small">Loading…</div>
+      <div class="small">${note || "No cached data. Tap Refresh to load."}</div>
       <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="refresh" disabled>Refresh</button>
+        <button class="btn primary" id="refresh">Refresh</button>
       </div>
       <div class="small" id="msg" style="margin-top:8px"></div>
     </div>
   `;
-  await loadAndRender(root, false);
+  root.querySelector("#refresh").onclick = () => refreshLeaderboard(root);
+}
+
+async function refreshLeaderboard(root) {
+  const routeAtStart = currentPath();
+  const stillHere = () => currentPath() === routeAtStart;
+
+  const refreshBtn = root.querySelector("#refresh");
+  const msgEl = root.querySelector("#msg");
+
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (msgEl) msgEl.textContent = "Loading…";
+
+  const res = await API.leaderboard();
+
+  if (!stillHere()) return;
+
+  if (refreshBtn) refreshBtn.disabled = false;
+
+  if (!res.ok) {
+    if (msgEl) msgEl.textContent = res.error || "Failed";
+    toastError(res.error || "Failed to load leaderboard");
+    return;
+  }
+
+  lsSet(LS_LEADERBOARD_KEY, { ts: Date.now(), data: res });
+  toastSuccess("Leaderboards refreshed.");
+
+  renderFromData(root, res, { cacheNote: "" });
+}
+
+export async function renderLeaderboardPage(root) {
+  cleanupCaches(); // keep storage tidy
+
+  // No API call on tab open — cache-first
+  const cached = lsGet(LS_LEADERBOARD_KEY);
+
+  if (cached?.data?.ok) {
+    const note = isFresh(cached, LEADERBOARD_TTL_MS)
+      ? "Loaded from device cache."
+      : "Loaded cached data (may be old). Tap Refresh if needed.";
+
+    renderFromData(root, cached.data, { cacheNote: note });
+    return;
+  }
+
+  renderEmpty(root, "No cached data yet. Tap Refresh to load.");
 }

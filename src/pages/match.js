@@ -1,28 +1,33 @@
 import { API } from "../api/endpoints.js";
 import { toastSuccess, toastError, toastInfo, toastWarn } from "../ui/toast.js";
-import { lsGet, lsSet, isFresh } from "../storage.js";
 import { cleanupCaches } from "../cache_cleanup.js";
 
 const PAGE_SIZE = 20;
 
-// LocalStorage cache keys
-const LS_MATCHES_LIST_KEY = "mlfc_matches_list_cache_v2";      // { ts, page, hasMore, total, items[] }
-const LS_MATCH_DETAIL_PREFIX = "mlfc_match_detail_cache_v2:";  // + code => { ts, data }
+// localStorage cache keys
+const LS_MATCHES_LIST_KEY = "mlfc_matches_list_cache_v2";       // { ts, page, hasMore, total, items[] }
+const LS_MATCH_DETAIL_PREFIX = "mlfc_match_detail_cache_v2:";   // + code => { ts, data }
+const LS_MATCHES_META_KEY = "mlfc_matches_meta_v1";             // { ts, fingerprint, latestCode }
 
-// TTLs (keep long because you want manual refresh)
-const TTL_MATCHES_LIST_MS = 24 * 60 * 60 * 1000; // 24 hours
-const TTL_MATCH_DETAIL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const TTL_MATCHES_LIST_MS = 24 * 60 * 60 * 1000; // 24h (manual refresh policy)
+const TTL_MATCH_DETAIL_MS = 24 * 60 * 60 * 1000; // 24h
 
-function baseUrl() {
-  return location.href.split("#")[0];
-}
+function baseUrl() { return location.href.split("#")[0]; }
+function detailKey(code) { return `${LS_MATCH_DETAIL_PREFIX}${code}`; }
 
 function waOpenPrefill(text) {
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
-function detailKey(code) {
-  return `${LS_MATCH_DETAIL_PREFIX}${code}`;
+function lsGet(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+function isFresh(entry, ttlMs) {
+  if (!entry?.ts) return false;
+  return (Date.now() - entry.ts) <= ttlMs;
 }
 
 function formatHumanDateTime(dateStr, timeStr) {
@@ -80,7 +85,6 @@ function summarizeScore(match) {
   const home = match.scoreHome;
   const away = match.scoreAway;
   const has = home !== "" && away !== "" && home != null && away != null;
-
   if (!has) return "Score: (not submitted yet)";
   if (String(match.type).toUpperCase() === "INTERNAL") return `Score: Blue ${home} - ${away} Orange`;
   return `Score: Manor Lakes ${home} - ${away} Opponent`;
@@ -139,7 +143,10 @@ function renderMatchesListShell(root) {
   root.innerHTML = `
     <div class="card">
       <div class="h1">Matches</div>
-      <div class="small">This list is cached on your device. Tap Refresh if needed.</div>
+      <div class="small">Cached on your device. Tap Refresh when you want.</div>
+
+      <div id="newMatchBanner" style="display:none; margin-top:12px"></div>
+
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="refresh">Refresh</button>
       </div>
@@ -153,6 +160,69 @@ function renderMatchesListShell(root) {
       <div class="small" id="pagerInfo" style="margin-top:8px"></div>
     </div>
   `;
+}
+
+function showBanner(root, latestCode) {
+  const banner = root.querySelector("#newMatchBanner");
+  if (!banner) return;
+
+  banner.style.display = "block";
+  banner.innerHTML = `
+    <div class="card" style="border:1px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.10)">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <div style="min-width:0">
+          <div style="font-weight:950">New match available</div>
+          <div class="small">Tap Update to load the latest matches list.</div>
+        </div>
+        <div class="row" style="gap:10px">
+          <button class="btn primary" id="updateList">Update</button>
+          ${latestCode ? `<button class="btn gray" id="openLatest">Open</button>` : ""}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const updateBtn = root.querySelector("#updateList");
+  const openBtn = root.querySelector("#openLatest");
+
+  if (openBtn) {
+    openBtn.onclick = () => {
+      location.hash = `#/match?code=${encodeURIComponent(latestCode)}`;
+    };
+  }
+
+  updateBtn.onclick = async () => {
+    setDisabled(updateBtn, true, "Updating…");
+    const res = await API.publicMatches(1, PAGE_SIZE);
+    setDisabled(updateBtn, false);
+
+    if (!res.ok) {
+      toastError(res.error || "Failed to update list");
+      return;
+    }
+
+    const cacheObj = {
+      ts: Date.now(),
+      page: res.page,
+      hasMore: res.hasMore,
+      total: res.total,
+      items: res.matches || []
+    };
+    lsSet(LS_MATCHES_LIST_KEY, cacheObj);
+    renderMatchesList(root, cacheObj);
+
+    // Hide banner after update
+    banner.style.display = "none";
+    banner.innerHTML = "";
+    toastSuccess("Matches updated.");
+  };
+}
+
+function hideBanner(root) {
+  const banner = root.querySelector("#newMatchBanner");
+  if (!banner) return;
+  banner.style.display = "none";
+  banner.innerHTML = "";
 }
 
 function renderMatchesList(root, cacheObj) {
@@ -210,10 +280,6 @@ function renderMatchesList(root, cacheObj) {
   }
 }
 
-async function fetchMatchesPage(page) {
-  return await API.publicMatches(page, PAGE_SIZE);
-}
-
 async function showMatchesTab(root) {
   renderMatchesListShell(root);
 
@@ -221,24 +287,43 @@ async function showMatchesTab(root) {
   const refreshBtn = root.querySelector("#refresh");
   const loadMoreBtn = root.querySelector("#loadMore");
 
-  // Load cached list from localStorage (shared across tabs)
+  // 1) Render cached list instantly (no API call)
   const cached = lsGet(LS_MATCHES_LIST_KEY);
-  if (cached?.items?.length && isFresh(cached, TTL_MATCHES_LIST_MS)) {
+  if (cached?.items?.length) {
     renderMatchesList(root, cached);
-    msgEl.textContent = "Loaded from device cache.";
-  } else if (cached?.items?.length) {
-    // stale but still useful (you prefer manual refresh)
-    renderMatchesList(root, cached);
-    msgEl.textContent = "Loaded cached list (may be old). Tap Refresh if needed.";
+    msgEl.textContent = isFresh(cached, TTL_MATCHES_LIST_MS)
+      ? "Loaded from device cache."
+      : "Loaded cached list (may be old). Tap Refresh if needed.";
   } else {
     msgEl.textContent = "No cached matches yet. Tap Refresh to load.";
   }
 
+  // 2) Background meta check (tiny request) to see if new match exists
+  // This does NOT fetch full list; only shows banner if changed.
+  API.publicMatchesMeta()
+    .then(meta => {
+      if (!meta?.ok) return;
+
+      const prev = lsGet(LS_MATCHES_META_KEY);
+      const changed = !prev || prev.fingerprint !== meta.fingerprint;
+
+      // Store latest meta
+      lsSet(LS_MATCHES_META_KEY, { ts: Date.now(), fingerprint: meta.fingerprint, latestCode: meta.latestCode });
+
+      if (changed && meta.fingerprint) {
+        showBanner(root, meta.latestCode);
+      } else {
+        hideBanner(root);
+      }
+    })
+    .catch(() => { /* ignore */ });
+
+  // Refresh button (full fetch)
   refreshBtn.onclick = async () => {
     setDisabled(refreshBtn, true, "Refreshing…");
     msgEl.textContent = "Loading…";
 
-    const res = await fetchMatchesPage(1);
+    const res = await API.publicMatches(1, PAGE_SIZE);
 
     setDisabled(refreshBtn, false);
 
@@ -248,20 +333,16 @@ async function showMatchesTab(root) {
       return;
     }
 
-    const cacheObj = {
-      ts: Date.now(),
-      page: res.page,
-      hasMore: res.hasMore,
-      total: res.total,
-      items: res.matches || []
-    };
+    const cacheObj = { ts: Date.now(), page: res.page, hasMore: res.hasMore, total: res.total, items: res.matches || [] };
     lsSet(LS_MATCHES_LIST_KEY, cacheObj);
     renderMatchesList(root, cacheObj);
+    hideBanner(root);
 
     toastSuccess("Matches refreshed.");
     msgEl.textContent = "";
   };
 
+  // Load more
   loadMoreBtn.onclick = async () => {
     const cached2 = lsGet(LS_MATCHES_LIST_KEY);
     if (!cached2?.page) { toastWarn("Refresh first."); return; }
@@ -269,7 +350,7 @@ async function showMatchesTab(root) {
     setDisabled(loadMoreBtn, true, "Loading…");
 
     const nextPage = cached2.page + 1;
-    const res = await fetchMatchesPage(nextPage);
+    const res = await API.publicMatches(nextPage, PAGE_SIZE);
 
     if (!res.ok) {
       setDisabled(loadMoreBtn, false);
@@ -278,13 +359,7 @@ async function showMatchesTab(root) {
     }
 
     const merged = [...(cached2.items || []), ...(res.matches || [])];
-    const newCache = {
-      ts: Date.now(),
-      page: res.page,
-      hasMore: res.hasMore,
-      total: res.total,
-      items: merged
-    };
+    const newCache = { ts: Date.now(), page: res.page, hasMore: res.hasMore, total: res.total, items: merged };
     lsSet(LS_MATCHES_LIST_KEY, newCache);
     renderMatchesList(root, newCache);
 
@@ -297,7 +372,7 @@ async function showMatchesTab(root) {
 async function getDetail(code) {
   const cached = lsGet(detailKey(code));
   if (cached?.data?.ok && isFresh(cached, TTL_MATCH_DETAIL_MS)) return cached.data;
-  if (cached?.data?.ok) return cached.data; // allow stale since manual refresh philosophy
+  if (cached?.data?.ok) return cached.data; // allow stale (manual refresh philosophy)
   return null;
 }
 
@@ -423,7 +498,6 @@ async function renderAvailability(root, data) {
     setTimeout(() => setDisabled(btn, false), 900);
   };
 
-  // Load players only when needed
   const playersRes = await API.players();
   if (!playersRes.ok) {
     toastError(playersRes.error || "Failed to load players");
@@ -493,7 +567,7 @@ async function renderAvailability(root, data) {
       yesBtn.disabled = false; noBtn.disabled = false; maybeBtn.disabled = false;
     }, 900);
 
-    // Update localStorage match detail cache so reopening is instant
+    // update device cache for this match detail
     const cachedDetail = await getDetail(m.publicCode);
     const merged = cachedDetail?.ok ? cachedDetail : data;
     merged.availability = availability;
@@ -506,26 +580,23 @@ async function renderAvailability(root, data) {
 }
 
 export async function renderMatchPage(root, query) {
-  const code = query.get("code");
-cleanupCaches();
+  cleanupCaches();
 
+  const code = query.get("code");
   if (!code) {
     await showMatchesTab(root);
     return;
   }
 
-  // Use localStorage match detail cache (works across tabs)
+  // match detail: cache-first, no auto refresh
   const cached = await getDetail(code);
   if (cached?.ok) {
     const status = String(cached.match?.status || "").toUpperCase();
     if (status === "COMPLETED") await renderCompleted(root, cached);
     else await renderAvailability(root, cached);
-
-    toastInfo("Loaded from device cache. (Manual refresh only)");
     return;
   }
 
-  // No cache => fetch once
   root.innerHTML = `
     <div class="card">
       <div class="h1">Loading…</div>

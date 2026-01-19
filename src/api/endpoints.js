@@ -16,6 +16,7 @@ export const API = {
     apiPost({ action:"set_availability", publicCode, playerName, availability, note }),
 
   leaderboard: () => apiGet({ action:"leaderboard" }),
+publicMatchesMeta: () => apiGet({ action: "public_matches_meta" }),
 
   // admin
   adminListMatches: (adminKey) => apiGet({ action:"admin_list_matches", adminKey }),
