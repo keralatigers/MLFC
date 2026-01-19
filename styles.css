@@ -597,14 +597,5 @@ a:hover { text-decoration: underline; }
 }
 
 
-/* Compact internal setup table buttons for mobile */
-.compactBtn {
-  padding: 8px 8px !important;
-  border-radius: 10px !important;
-  width: 92px !important;
-  font-size: 12px !important;
-}
-.compactName {
-  font-size: 13px !important;
-  font-weight: 900 !important;
-}
+.compactBtn { padding: 8px 8px !important; border-radius: 10px !important; width: 92px !important; font-size: 12px !important; }
+.compactName { font-size: 13px !important; font-weight: 900 !important; }
