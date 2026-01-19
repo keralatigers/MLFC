@@ -1,13 +1,17 @@
 import { API } from "../api/endpoints.js";
 import { toastSuccess, toastError, toastInfo, toastWarn } from "../ui/toast.js";
+import { lsGet, lsSet, isFresh } from "../storage.js";
+import { cleanupCaches } from "../cache_cleanup.js";
 
 const PAGE_SIZE = 20;
 
-// Cache keys
-const SS_MATCHES_LIST_KEY = "mlfc_matches_list_cache_v1";     // { ts, page, hasMore, total, items[] }
-const SS_MATCH_DETAIL_PREFIX = "mlfc_match_detail_cache_v1:"; // + code => { ts, data }
+// LocalStorage cache keys
+const LS_MATCHES_LIST_KEY = "mlfc_matches_list_cache_v2";      // { ts, page, hasMore, total, items[] }
+const LS_MATCH_DETAIL_PREFIX = "mlfc_match_detail_cache_v2:";  // + code => { ts, data }
 
-function now() { return Date.now(); }
+// TTLs (keep long because you want manual refresh)
+const TTL_MATCHES_LIST_MS = 24 * 60 * 60 * 1000; // 24 hours
+const TTL_MATCH_DETAIL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function baseUrl() {
   return location.href.split("#")[0];
@@ -17,26 +21,8 @@ function waOpenPrefill(text) {
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
-function readSessionJson(key) {
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function writeSessionJson(key, obj) {
-  try {
-    sessionStorage.setItem(key, JSON.stringify(obj));
-  } catch {
-    // ignore
-  }
-}
-
 function detailKey(code) {
-  return `${SS_MATCH_DETAIL_PREFIX}${code}`;
+  return `${LS_MATCH_DETAIL_PREFIX}${code}`;
 }
 
 function formatHumanDateTime(dateStr, timeStr) {
@@ -129,16 +115,9 @@ function whatsappMatchDetailsMessage(match, ratingsAgg) {
   lines.push(`Status: ${match.status}`);
   lines.push(scoreLine);
   lines.push("");
-
   lines.push("Ratings (avg)");
-  if (!ratingsAgg.length) {
-    lines.push("1. -");
-  } else {
-    ratingsAgg.forEach((r, i) => {
-      lines.push(`${i + 1}. ${r.playerName} - ${r.avg.toFixed(2)} (${r.n})`);
-    });
-  }
-
+  if (!ratingsAgg.length) lines.push("1. -");
+  else ratingsAgg.forEach((r, i) => lines.push(`${i + 1}. ${r.playerName} - ${r.avg.toFixed(2)} (${r.n})`));
   lines.push("");
   lines.push(`Link: ${baseUrl()}#/match?code=${match.publicCode}`);
 
@@ -154,16 +133,13 @@ function setDisabled(btn, disabled, busyText) {
   }
 }
 
-/* -------------------------
-   Matches list view (#/match)
--------------------------- */
+/* ---------------- Matches List (#/match) ---------------- */
 
-function renderMatchesListSkeleton(root) {
+function renderMatchesListShell(root) {
   root.innerHTML = `
     <div class="card">
       <div class="h1">Matches</div>
-      <div class="small">Tap a match to submit availability or view results.</div>
-
+      <div class="small">This list is cached on your device. Tap Refresh if needed.</div>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="refresh">Refresh</button>
       </div>
@@ -179,13 +155,14 @@ function renderMatchesListSkeleton(root) {
   `;
 }
 
-function renderMatchesListFromCache(root, cacheObj) {
+function renderMatchesList(root, cacheObj) {
   const listEl = root.querySelector("#matchList");
   const pagerCard = root.querySelector("#pagerCard");
   const pagerInfo = root.querySelector("#pagerInfo");
   const loadMoreBtn = root.querySelector("#loadMore");
 
   const items = cacheObj.items || [];
+
   listEl.innerHTML = items.map(m => {
     const status = String(m.status || "").toUpperCase();
     const when = formatHumanDateTime(m.date, m.time);
@@ -217,7 +194,6 @@ function renderMatchesListFromCache(root, cacheObj) {
     `;
   }).join("") || `<div class="card"><div class="small">No matches found.</div></div>`;
 
-  // bind open buttons
   listEl.querySelectorAll("[data-open]").forEach(btn => {
     btn.onclick = () => {
       const code = btn.getAttribute("data-open");
@@ -225,7 +201,6 @@ function renderMatchesListFromCache(root, cacheObj) {
     };
   });
 
-  // pager
   if (cacheObj.hasMore) {
     pagerCard.style.display = "block";
     pagerInfo.textContent = `Showing ${Math.min(cacheObj.page * PAGE_SIZE, cacheObj.total)} of ${cacheObj.total}`;
@@ -235,33 +210,35 @@ function renderMatchesListFromCache(root, cacheObj) {
   }
 }
 
-async function loadMatchesPage(page) {
-  const res = await API.publicMatches(page, PAGE_SIZE);
-  return res;
+async function fetchMatchesPage(page) {
+  return await API.publicMatches(page, PAGE_SIZE);
 }
 
-async function renderMatchesList(root) {
-  renderMatchesListSkeleton(root);
+async function showMatchesTab(root) {
+  renderMatchesListShell(root);
 
   const msgEl = root.querySelector("#msg");
   const refreshBtn = root.querySelector("#refresh");
   const loadMoreBtn = root.querySelector("#loadMore");
 
-  // 1) render from cache immediately (NO API call)
-  const cached = readSessionJson(SS_MATCHES_LIST_KEY);
-  if (cached?.items?.length) {
-    renderMatchesListFromCache(root, cached);
-    msgEl.textContent = "Showing cached list. Tap Refresh if needed.";
+  // Load cached list from localStorage (shared across tabs)
+  const cached = lsGet(LS_MATCHES_LIST_KEY);
+  if (cached?.items?.length && isFresh(cached, TTL_MATCHES_LIST_MS)) {
+    renderMatchesList(root, cached);
+    msgEl.textContent = "Loaded from device cache.";
+  } else if (cached?.items?.length) {
+    // stale but still useful (you prefer manual refresh)
+    renderMatchesList(root, cached);
+    msgEl.textContent = "Loaded cached list (may be old). Tap Refresh if needed.";
   } else {
-    msgEl.textContent = "Tap Refresh to load matches.";
+    msgEl.textContent = "No cached matches yet. Tap Refresh to load.";
   }
 
-  // Refresh does API call
   refreshBtn.onclick = async () => {
     setDisabled(refreshBtn, true, "Refreshing…");
-    msgEl.textContent = "Loading matches…";
+    msgEl.textContent = "Loading…";
 
-    const res = await loadMatchesPage(1);
+    const res = await fetchMatchesPage(1);
 
     setDisabled(refreshBtn, false);
 
@@ -272,31 +249,27 @@ async function renderMatchesList(root) {
     }
 
     const cacheObj = {
-      ts: now(),
+      ts: Date.now(),
       page: res.page,
       hasMore: res.hasMore,
       total: res.total,
       items: res.matches || []
     };
-    writeSessionJson(SS_MATCHES_LIST_KEY, cacheObj);
-    renderMatchesListFromCache(root, cacheObj);
+    lsSet(LS_MATCHES_LIST_KEY, cacheObj);
+    renderMatchesList(root, cacheObj);
 
     toastSuccess("Matches refreshed.");
     msgEl.textContent = "";
   };
 
-  // Load more appends and updates cache (API call)
   loadMoreBtn.onclick = async () => {
-    const cached2 = readSessionJson(SS_MATCHES_LIST_KEY);
-    if (!cached2?.page) {
-      toastWarn("Please refresh first.");
-      return;
-    }
+    const cached2 = lsGet(LS_MATCHES_LIST_KEY);
+    if (!cached2?.page) { toastWarn("Refresh first."); return; }
 
     setDisabled(loadMoreBtn, true, "Loading…");
 
     const nextPage = cached2.page + 1;
-    const res = await loadMatchesPage(nextPage);
+    const res = await fetchMatchesPage(nextPage);
 
     if (!res.ok) {
       setDisabled(loadMoreBtn, false);
@@ -306,37 +279,33 @@ async function renderMatchesList(root) {
 
     const merged = [...(cached2.items || []), ...(res.matches || [])];
     const newCache = {
-      ts: now(),
+      ts: Date.now(),
       page: res.page,
       hasMore: res.hasMore,
       total: res.total,
       items: merged
     };
-    writeSessionJson(SS_MATCHES_LIST_KEY, newCache);
+    lsSet(LS_MATCHES_LIST_KEY, newCache);
+    renderMatchesList(root, newCache);
 
-    // render updated list without re-calling initial API
-    renderMatchesListFromCache(root, newCache);
-
-    // keep disabled state correct
     if (newCache.hasMore) setDisabled(loadMoreBtn, false);
   };
 }
 
-/* -------------------------
-   Match detail view (#/match?code=...)
--------------------------- */
+/* ---------------- Match Detail (#/match?code=...) ---------------- */
 
-async function getMatchDetailCached(code) {
-  const cached = readSessionJson(detailKey(code));
-  if (cached?.data?.ok) return cached.data;
+async function getDetail(code) {
+  const cached = lsGet(detailKey(code));
+  if (cached?.data?.ok && isFresh(cached, TTL_MATCH_DETAIL_MS)) return cached.data;
+  if (cached?.data?.ok) return cached.data; // allow stale since manual refresh philosophy
   return null;
 }
 
-function saveMatchDetailCache(code, data) {
-  writeSessionJson(detailKey(code), { ts: now(), data });
+function saveDetail(code, data) {
+  lsSet(detailKey(code), { ts: Date.now(), data });
 }
 
-async function renderCompletedMatch(root, data) {
+async function renderCompleted(root, data) {
   const m = data.match;
   const when = formatHumanDateTime(m.date, m.time);
   const scoreLine = summarizeScore(m);
@@ -353,7 +322,7 @@ async function renderCompletedMatch(root, data) {
       <div class="small" style="margin-top:6px">${scoreLine}</div>
 
       <div class="row" style="margin-top:12px">
-        <button class="btn primary" id="shareMatchDetails">Share match details</button>
+        <button class="btn primary" id="shareDetails">Share match details</button>
         <button class="btn gray" id="back">Back to matches</button>
       </div>
     </div>
@@ -371,27 +340,24 @@ async function renderCompletedMatch(root, data) {
     </div>
   `;
 
-  root.querySelector("#back").onclick = () => {
-    // IMPORTANT: go back without re-calling matches API (list uses cache)
-    location.hash = "#/match";
-  };
+  root.querySelector("#back").onclick = () => { location.hash = "#/match"; };
 
-  root.querySelector("#shareMatchDetails").onclick = () => {
-    const btn = root.querySelector("#shareMatchDetails");
+  root.querySelector("#shareDetails").onclick = () => {
+    const btn = root.querySelector("#shareDetails");
     setDisabled(btn, true, "Opening…");
     waOpenPrefill(whatsappMatchDetailsMessage(m, ratingsAgg));
-    toastInfo("WhatsApp opened with match details.");
+    toastInfo("WhatsApp opened.");
     setTimeout(() => setDisabled(btn, false), 900);
   };
 }
 
-async function renderAvailabilityMatch(root, data) {
+async function renderAvailability(root, data) {
   const m = data.match;
   const status = String(m.status || "").toUpperCase();
   const when = formatHumanDateTime(m.date, m.time);
 
   let availability = normalizeAvail(data.availability || []);
-  const { yes, no, maybe } = groupAvail(availability);
+  const grouped = groupAvail(availability);
 
   root.innerHTML = `
     <div class="card">
@@ -437,42 +403,36 @@ async function renderAvailabilityMatch(root, data) {
       <div class="h1">Availability</div>
 
       <div class="small"><b>Available</b></div>
-      <ol id="yesList" class="list">${yes.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
+      <ol id="yesList" class="list">${grouped.yes.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
 
       <div class="small" style="margin-top:12px"><b>Not available</b></div>
-      <ol id="noList" class="list">${no.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
+      <ol id="noList" class="list">${grouped.no.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
 
       <div class="small" style="margin-top:12px"><b>Maybe</b></div>
-      <ol id="maybeList" class="list">${maybe.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
+      <ol id="maybeList" class="list">${grouped.maybe.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`}</ol>
     </div>
   `;
 
-  // back button (no matches API call)
-  root.querySelector("#back").onclick = () => {
-    location.hash = "#/match";
-  };
+  root.querySelector("#back").onclick = () => { location.hash = "#/match"; };
 
-  // share availability
   root.querySelector("#shareAvail").onclick = () => {
     const btn = root.querySelector("#shareAvail");
     setDisabled(btn, true, "Opening…");
     waOpenPrefill(whatsappAvailabilityMessage(m, availability));
-    toastInfo("WhatsApp opened with availability list.");
+    toastInfo("WhatsApp opened.");
     setTimeout(() => setDisabled(btn, false), 900);
   };
 
-  // load players list on demand
+  // Load players only when needed
   const playersRes = await API.players();
-  const playerEl = root.querySelector("#player");
-  const searchEl = root.querySelector("#playerSearch");
-
   if (!playersRes.ok) {
-    playerEl.innerHTML = `<option value="">(failed to load players)</option>`;
     toastError(playersRes.error || "Failed to load players");
     return;
   }
 
   const allPlayers = (playersRes.players || []).map(p => p.name).filter(Boolean).sort();
+  const playerEl = root.querySelector("#player");
+  const searchEl = root.querySelector("#playerSearch");
 
   function renderOptions(filterText = "") {
     const f = filterText.trim().toLowerCase();
@@ -494,10 +454,10 @@ async function renderAvailabilityMatch(root, data) {
       availability.push({ playerName, availability: choice, note: note || "" });
     }
 
-    const grouped = groupAvail(availability);
-    root.querySelector("#yesList").innerHTML = grouped.yes.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
-    root.querySelector("#noList").innerHTML = grouped.no.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
-    root.querySelector("#maybeList").innerHTML = grouped.maybe.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
+    const g = groupAvail(availability);
+    root.querySelector("#yesList").innerHTML = g.yes.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
+    root.querySelector("#noList").innerHTML = g.no.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
+    root.querySelector("#maybeList").innerHTML = g.maybe.map(n => `<li>${n}</li>`).join("") || `<li>-</li>`;
   }
 
   async function submit(choice) {
@@ -505,53 +465,39 @@ async function renderAvailabilityMatch(root, data) {
     const note = (root.querySelector("#note").value || "").trim();
     const msgEl = root.querySelector("#msg");
 
-    if (!playerName) {
-      toastWarn("Please select your name.");
-      return;
-    }
+    if (!playerName) { toastWarn("Select your name."); return; }
 
-    // disable buttons to avoid double click
     const yesBtn = root.querySelector("#yesBtn");
     const noBtn = root.querySelector("#noBtn");
     const maybeBtn = root.querySelector("#maybeBtn");
-    setDisabled(yesBtn, true);
-    setDisabled(noBtn, true);
-    setDisabled(maybeBtn, true);
+    yesBtn.disabled = true; noBtn.disabled = true; maybeBtn.disabled = true;
 
-    // immediate UI update (no refresh)
     updateAvailabilityLocal(playerName, choice, note);
     msgEl.textContent = "Saving…";
 
     const res = await API.setAvailability(m.publicCode, playerName, choice, note);
-
     if (!res.ok) {
       msgEl.textContent = res.error || "Failed";
-      toastError(res.error || "Failed to submit availability");
-      setDisabled(yesBtn, false);
-      setDisabled(noBtn, false);
-      setDisabled(maybeBtn, false);
+      toastError(res.error || "Failed to submit");
+      yesBtn.disabled = false; noBtn.disabled = false; maybeBtn.disabled = false;
       return;
     }
 
     msgEl.textContent = "Saved ✅";
     toastSuccess(`Saved: ${choice}`, "Availability");
 
-    // open WhatsApp message in required format
     waOpenPrefill(whatsappAvailabilityMessage(m, availability));
     toastInfo("WhatsApp opened (tap Send).");
 
-    // re-enable after short delay
     setTimeout(() => {
-      setDisabled(yesBtn, false);
-      setDisabled(noBtn, false);
-      setDisabled(maybeBtn, false);
+      yesBtn.disabled = false; noBtn.disabled = false; maybeBtn.disabled = false;
     }, 900);
 
-    // update detail cache so if reopened, it reflects latest without fetching
-    const cachedDetail = await getMatchDetailCached(m.publicCode);
+    // Update localStorage match detail cache so reopening is instant
+    const cachedDetail = await getDetail(m.publicCode);
     const merged = cachedDetail?.ok ? cachedDetail : data;
     merged.availability = availability;
-    saveMatchDetailCache(m.publicCode, merged);
+    saveDetail(m.publicCode, merged);
   }
 
   root.querySelector("#yesBtn").onclick = () => submit("YES");
@@ -561,30 +507,25 @@ async function renderAvailabilityMatch(root, data) {
 
 export async function renderMatchPage(root, query) {
   const code = query.get("code");
+cleanupCaches();
 
-  // Matches tab (no code)
   if (!code) {
-    await renderMatchesList(root);
+    await showMatchesTab(root);
     return;
   }
 
-  // 1) Try cached detail first (instant view, no API call)
-  const cachedDetail = await getMatchDetailCached(code);
-  if (cachedDetail?.ok) {
-    // render from cache immediately
-    const status = String(cachedDetail.match?.status || "").toUpperCase();
-    if (status === "COMPLETED") {
-      await renderCompletedMatch(root, cachedDetail);
-    } else {
-      await renderAvailabilityMatch(root, cachedDetail);
-    }
-    toastInfo("Showing cached match. (No auto refresh)");
-    // Important: do NOT auto fetch; user wanted no background calls.
-    // If you later want a manual refresh button per match, we can add it.
+  // Use localStorage match detail cache (works across tabs)
+  const cached = await getDetail(code);
+  if (cached?.ok) {
+    const status = String(cached.match?.status || "").toUpperCase();
+    if (status === "COMPLETED") await renderCompleted(root, cached);
+    else await renderAvailability(root, cached);
+
+    toastInfo("Loaded from device cache. (Manual refresh only)");
     return;
   }
 
-  // 2) No cache => fetch once
+  // No cache => fetch once
   root.innerHTML = `
     <div class="card">
       <div class="h1">Loading…</div>
@@ -599,13 +540,9 @@ export async function renderMatchPage(root, query) {
     return;
   }
 
-  // cache it
-  saveMatchDetailCache(code, data);
+  saveDetail(code, data);
 
   const status = String(data.match?.status || "").toUpperCase();
-  if (status === "COMPLETED") {
-    await renderCompletedMatch(root, data);
-  } else {
-    await renderAvailabilityMatch(root, data);
-  }
+  if (status === "COMPLETED") await renderCompleted(root, data);
+  else await renderAvailability(root, data);
 }
