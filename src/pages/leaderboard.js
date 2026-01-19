@@ -5,24 +5,15 @@ function currentPath() {
   return (location.hash || "#/match").split("?")[0];
 }
 
-function setDisabled(btn, disabled, busyText) {
-  if (!btn) return;
-  btn.disabled = disabled;
-  if (busyText) {
-    if (!btn.dataset.origText) btn.dataset.origText = btn.textContent;
-    btn.textContent = disabled ? busyText : btn.dataset.origText;
-  }
-}
-
 function renderFromData(root, data) {
   const topScorers = (data.topScorers || []).slice(0, 10);
   const topAssists = (data.topAssists || []).slice(0, 10);
-  const bestPlayers = (data.bestPlayers || []).slice(0, 10);
+  const bestPlayers = (data.bestPlayers || []).slice(0, 10); // show even if 1 rating
 
   root.innerHTML = `
     <div class="card">
       <div class="h1">Leaderboards</div>
-      <div class="small">Tap Refresh to reload. (No background auto refresh.)</div>
+      <div class="small">Tap refresh when you want. No background reload.</div>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="refresh">Refresh</button>
       </div>
@@ -56,23 +47,25 @@ function renderFromData(root, data) {
       </ul>
     </div>
   `;
+
+  const refreshBtn = root.querySelector("#refresh");
+  refreshBtn.onclick = () => loadAndRender(root, true);
 }
 
-async function loadAndRender(root, routeAtStart, { toastOnSuccess } = { toastOnSuccess: false }) {
+async function loadAndRender(root, showToast) {
+  const routeAtStart = currentPath();
   const stillHere = () => currentPath() === routeAtStart;
-  if (!stillHere()) return;
 
-  const btn = root.querySelector("#refresh");
   const msg = root.querySelector("#msg");
-
-  setDisabled(btn, true, "Refreshing…");
+  const btn = root.querySelector("#refresh");
+  if (btn) btn.disabled = true;
   if (msg) msg.textContent = "Loading…";
 
   const data = await API.leaderboard();
-
   if (!stillHere()) return;
 
-  setDisabled(btn, false);
+  if (btn) btn.disabled = false;
+
   if (!data.ok) {
     if (msg) msg.textContent = data.error || "Failed";
     toastError(data.error || "Failed to load leaderboard");
@@ -80,14 +73,10 @@ async function loadAndRender(root, routeAtStart, { toastOnSuccess } = { toastOnS
   }
 
   renderFromData(root, data);
-  root.querySelector("#refresh").onclick = () => loadAndRender(root, routeAtStart, { toastOnSuccess: true });
-
-  if (toastOnSuccess) toastSuccess("Leaderboards refreshed.");
+  if (showToast) toastSuccess("Leaderboards refreshed.");
 }
 
 export async function renderLeaderboardPage(root) {
-  const routeAtStart = currentPath();
-
   root.innerHTML = `
     <div class="card">
       <div class="h1">Leaderboards</div>
@@ -98,6 +87,5 @@ export async function renderLeaderboardPage(root) {
       <div class="small" id="msg" style="margin-top:8px"></div>
     </div>
   `;
-
-  await loadAndRender(root, routeAtStart, { toastOnSuccess: false });
+  await loadAndRender(root, false);
 }
