@@ -530,7 +530,6 @@ async function renderMatchDetail(root, code) {
 
       <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
         <button class="btn gray" id="backBtn">Back</button>
-        <button class="btn primary" id="shareBtn">Share</button>
         <button class="btn gray" id="refreshMatchBtn">Refresh match</button>
       </div>
 
@@ -540,7 +539,10 @@ async function renderMatchDetail(root, code) {
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <div class="h1">Availability</div>
-        <button class="btn gray" id="refreshNamesBtn" title="Refresh names" style="padding:8px 10px;border-radius:12px">↻</button>
+        <div class="row" style="gap:10px; align-items:center">
+          <button class="btn primary" id="shareBtn">Share</button>
+          <button class="btn gray" id="refreshNamesBtn" title="Refresh names" style="padding:8px 10px;border-radius:12px">Refresh Players ↻</button>
+        </div>
       </div>
 
       ${

@@ -128,7 +128,12 @@ function getHeaders(sh) {
 function headerMap(sh) {
   const headers = getHeaders(sh);
   const h = {};
-  headers.forEach((k, i) => h[String(k)] = i);
+  headers.forEach((k, i) => {
+    const key = String(k);
+    h[key] = i;
+    const low = key.toLowerCase();
+    if (h[low] == null) h[low] = i;
+  });
   return h;
 }
 
@@ -703,7 +708,7 @@ const action = (body.action || "").toLowerCase();
    Public: Register Player
    ========================= */
 if (action === "register_player") {
-  const name = String(body.name || "").trim();
+  const name = String(body.name || "").trim().replace(/\s+/g, " ");
   const phone = String(body.phone || "").trim();
 
   if (!name) {
@@ -750,7 +755,7 @@ if (action === "register_player") {
     if (action === "admin_create_season") {
       requireAdminKey(body.adminKey);
 
-      const name = String(body.name || "").trim();
+      const name = String(body.name || "").trim().replace(/\s+/g, " ");
       const startDate = String(body.startDate || "").trim();
       const endDate = String(body.endDate || "").trim();
       if (!name || !startDate || !endDate) return jsonOut({ ok: false, error: "name/startDate/endDate required" });
@@ -1025,24 +1030,81 @@ if (action === "set_availability") {
 
       // Restrict to captains if set
       try { ensureCaptainAllowed(m2.matchId, captain); } catch (e) { /* allow still if not set */ }
+      // Append ratings + (optional) goals/assists
+      //
+      // Ratings are stored in SHEET_RATINGS (only when 1-10).
+      // Goals/Assists are stored in SHEET_EVENTS (if that sheet exists).
+      // To avoid double-counting, we replace existing EVENTS rows for (matchId, playerName)
+      // for any player included in this batch.
 
-      // Append ratings
+      const eventMap = {}; // playerName -> {goals, assists}
+
       rows.forEach(r => {
-        const p = String(r.playerName || "").trim();
-        const val = Number(r.rating || 0);
-        const teamAtMatch = String(r.teamAtMatch || "").toUpperCase();
+        const p = String(r.playerName || '').trim();
         if (!p) return;
-        if (!(val >= 1 && val <= 10)) return;
 
-        appendRow(SHEET_RATINGS, {
-          matchId: m2.matchId,
-          playerName: p,
-          rating: val,
-          givenBy: captain,
-          timestamp: isoNow(),
-          teamAtMatch: teamAtMatch
-        });
+        const val = Number(r.rating || 0);
+        const teamAtMatch = String(r.teamAtMatch || '').toUpperCase();
+
+        // rating
+        if (val >= 1 && val <= 10) {
+          appendRow(SHEET_RATINGS, {
+            matchId: m2.matchId,
+            playerName: p,
+            rating: val,
+            givenBy: captain,
+            timestamp: isoNow(),
+            teamAtMatch: teamAtMatch
+          });
+        }
+
+        // goals/assists (store even if 0 if provided)
+        let g = r.goals;
+        let a = r.assists;
+        // Treat empty string / null as "not provided"
+        const gProvided = g !== undefined && g !== null && String(g).trim() !== '';
+        const aProvided = a !== undefined && a !== null && String(a).trim() !== '';
+        if (gProvided || aProvided) {
+          g = gProvided ? Number(g) : 0;
+          a = aProvided ? Number(a) : 0;
+          if (!Number.isFinite(g) || g < 0) g = 0;
+          if (!Number.isFinite(a) || a < 0) a = 0;
+          eventMap[p] = { goals: Math.floor(g), assists: Math.floor(a) };
+        }
       });
+
+      // Update EVENTS sheet with latest goals/assists for this match (best-effort)
+      if (sheetExists(SHEET_EVENTS) && Object.keys(eventMap).length) {
+        try {
+          const eSh = getSheet(SHEET_EVENTS);
+          const eH = headerMap(eSh);
+          const eRows = readAllDataRows(eSh);
+
+          // delete existing rows for this match + players in eventMap
+          for (let i = eRows.length - 1; i >= 0; i--) {
+            const mid = String(eRows[i][eH.matchId] || '');
+            const pn = String(eRows[i][eH.playerName] || '').trim();
+            if (mid === String(m2.matchId) && eventMap[pn]) {
+              eSh.deleteRow(i + 2);
+            }
+          }
+
+          // append new events rows
+          Object.keys(eventMap).forEach(pn => {
+            appendRow(SHEET_EVENTS, {
+              matchId: m2.matchId,
+              playerName: pn,
+              goals: eventMap[pn].goals,
+              assists: eventMap[pn].assists,
+              givenBy: captain,
+              timestamp: isoNow()
+            });
+          });
+        } catch (e) {
+          // ignore events update errors
+        }
+      }
+
 
       // Update TEAMS sheet with teamAtMatch for those players (best-effort)
       // This makes "captain changed teams" visible in public match detail.
