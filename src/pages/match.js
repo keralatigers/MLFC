@@ -38,7 +38,7 @@ function scheduleMatchMetaCheck() {
   if (!ACTIVE_MATCH.pageRoot || !ACTIVE_MATCH.listRoot || !ACTIVE_MATCH.seasonId) return;
   if (!isMatchRouteActive()) return;
 
-  // Only check when list view is visible (not on detail-only screens)
+  // Only check when list view is visible
   const listEl = ACTIVE_MATCH.pageRoot.querySelector("#matchListView");
   if (!listEl || listEl.style.display === "none") return;
 
@@ -52,15 +52,21 @@ function ensureMatchMetaActivationListeners() {
 
   // Runs when user navigates back to #/match (even if router skips re-render)
   window.addEventListener("hashchange", () => {
-    // allow router to show the container first
     setTimeout(scheduleMatchMetaCheck, 0);
   });
-  // Runs when user switches back to the tab/app
+  // Runs when user switches back to the app/tab
   window.addEventListener("focus", () => setTimeout(scheduleMatchMetaCheck, 0));
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) setTimeout(scheduleMatchMetaCheck, 0);
   });
+
+  // Fallback: if your tab UI only hides/shows containers (no hash change),
+  // this periodic check ensures we still detect new matches.
+  setInterval(() => {
+    if (isMatchRouteActive()) scheduleMatchMetaCheck();
+  }, 4000);
 }
+
 
 function now() { return Date.now(); }
 function lsGet(k){ try{return JSON.parse(localStorage.getItem(k)||"null");}catch{return null;} }
@@ -259,27 +265,25 @@ async function refreshPlayersCache() {
   return list;
 }
 
-// Banner lives inside the list view. We pass the list root explicitly so that
-// Update can re-render using the *page root* (not the list element).
-function renderBanner(listRoot, html) {
-  const el = listRoot.querySelector("#banner");
+function renderBanner(root, html) {
+  const el = root.querySelector("#banner");
   if (!el) return;
   el.innerHTML = html || "";
 }
 
-async function checkMetaAndShowBanner(pageRoot, listRoot, seasonId) {
+async function checkMetaAndShowBanner(root, seasonId) {
   const prev = lsGet(metaKey(seasonId));
   const res = await API.publicMatchesMeta(seasonId);
 
   if (!res || res.ok !== true) {
-    renderBanner(listRoot, "");
+    renderBanner(root, "");
     return;
   }
 
   const next = { ts: now(), fingerprint: res.fingerprint || "", latestCode: res.latestCode || "" };
   lsSet(metaKey(seasonId), next);
 
-  if (!next.fingerprint) { renderBanner(listRoot, ""); return; }
+  if (!next.fingerprint) { renderBanner(root, ""); return; }
 
   const openCache = lsGet(openKey(seasonId));
   const openCodes = (openCache?.matches || []).map(m => m.publicCode);
@@ -287,11 +291,11 @@ async function checkMetaAndShowBanner(pageRoot, listRoot, seasonId) {
 
   const changed = !prev || prev.fingerprint !== next.fingerprint;
   if (!changed && !missingLatest) {
-    renderBanner(listRoot, "");
+    renderBanner(root, "");
     return;
   }
 
-  renderBanner(listRoot, `
+  renderBanner(root, `
     <div class="card" style="border:1px solid rgba(16,185,129,0.35); background: rgba(16,185,129,0.10)">
       <div class="row" style="justify-content:space-between; align-items:center">
         <div style="min-width:0">
@@ -306,7 +310,7 @@ async function checkMetaAndShowBanner(pageRoot, listRoot, seasonId) {
     </div>
   `);
 
-  const up = listRoot.querySelector("#metaUpdateBtn");
+  const up = root.querySelector("#metaUpdateBtn");
   if (up) up.onclick = async () => {
     up.disabled = true; up.textContent = "Updating…";
 
@@ -329,8 +333,8 @@ async function checkMetaAndShowBanner(pageRoot, listRoot, seasonId) {
       latestCode: next.latestCode
     });
 
-    // Refresh UI (MUST use page root; list root doesn't contain detail view)
-    renderMatchList(pageRoot, seasonId, out.matches || []);
+    // Refresh UI
+    renderMatchList(root, seasonId, out.matches || []);
 
     // Prefetch details for speed
     prefetchOpenMatchDetails(out.matches || []);
@@ -338,7 +342,7 @@ async function checkMetaAndShowBanner(pageRoot, listRoot, seasonId) {
     toastSuccess("Open matches updated.");
   };
 
-  const op = listRoot.querySelector("#metaOpenBtn");
+  const op = root.querySelector("#metaOpenBtn");
   if (op) op.onclick = () => {
     location.hash = `#/match?code=${encodeURIComponent(next.latestCode)}`;
   };
@@ -456,7 +460,7 @@ function renderMatchList(root, seasonId, openMatches) {
     SUPPRESS_META_ONCE = false;
     renderBanner(list, ""); // ensure banner disappears after update
   } else {
-    checkMetaAndShowBanner(root, list, seasonId).catch(()=>{});
+    checkMetaAndShowBanner(list, seasonId).catch(()=>{});
   }
 }
 
@@ -542,9 +546,11 @@ async function renderMatchDetail(root, code) {
       ${
         status === "OPEN"
           ? `
-            <div class="small">Type your name (search + select in one box), then tap YES / NO / MAYBE.</div>
-            <input id="playerName" class="input" list="playersDatalist" placeholder="Type your name..." style="margin-top:10px" />
-            <datalist id="playersDatalist"></datalist>
+            <div class="small">Search and select your name, then tap YES / NO / MAYBE.</div>
+            <div style="position:relative; margin-top:10px">
+              <input id="playerNameInput" class="input" placeholder="Type your name..." autocomplete="off" />
+              <div id="playerNameDropdown" style="position:absolute; left:0; right:0; top:calc(100% + 6px); max-height:240px; overflow:auto; background:#fff; border:1px solid rgba(11,18,32,0.12); border-radius:14px; box-shadow:0 10px 30px rgba(11,18,32,0.08); display:none; z-index:50"></div>
+            </div>
 
             <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
               <button class="btn good" id="btnYes">YES</button>
@@ -589,24 +595,48 @@ async function renderMatchDetail(root, code) {
   };
 
   renderAvailLists();
-
-  const nameInput = detail.querySelector("#playerName");
-  const datalist = detail.querySelector("#playersDatalist");
+  const nameInput = detail.querySelector("#playerNameInput");
+  const dropdown = detail.querySelector("#playerNameDropdown");
   const refreshNamesBtn = detail.querySelector("#refreshNamesBtn");
 
   let allPlayers = await getPlayersCached();
-  renderDatalist("");
 
-  function renderDatalist(filter="") {
-    if (!datalist) return;
+  function renderDropdown(filter="") {
+    if (!dropdown) return;
     const f = String(filter||"").trim().toLowerCase();
-    const list = f
-      ? allPlayers.filter(n=>n.toLowerCase().includes(f)).slice(0, 200)
-      : allPlayers.slice(0, 200);
-    datalist.innerHTML = list.map(n=>`<option value="${n}"></option>`).join("");
+    const list = (f ? allPlayers.filter(n=>n.toLowerCase().includes(f)) : allPlayers).slice(0, 40);
+    if (!list.length) {
+      dropdown.innerHTML = `<div class="small" style="padding:10px">No matches</div>`;
+    } else {
+      dropdown.innerHTML = list.map(n =>
+        `<div data-p="${encodeURIComponent(n)}" style="padding:12px 12px; border-top:1px solid rgba(11,18,32,0.06); cursor:pointer">${n}</div>`
+      ).join("");
+      // remove first border
+      const first = dropdown.firstElementChild;
+      if (first) first.style.borderTop = "none";
+    }
+    dropdown.style.display = "block";
+
+    dropdown.querySelectorAll("[data-p]").forEach(el => {
+      el.onclick = () => {
+        const val = decodeURIComponent(el.getAttribute("data-p"));
+        if (nameInput) nameInput.value = val;
+        dropdown.style.display = "none";
+      };
+    });
   }
 
-  if (nameInput) nameInput.addEventListener("input", ()=>renderDatalist(nameInput.value));
+  function hideDropdownSoon() {
+    // delay so click can register
+    setTimeout(() => { if (dropdown) dropdown.style.display = "none"; }, 160);
+  }
+
+  if (nameInput) {
+    nameInput.addEventListener("focus", () => renderDropdown(nameInput.value));
+    nameInput.addEventListener("input", () => renderDropdown(nameInput.value));
+    nameInput.addEventListener("blur", hideDropdownSoon);
+  }
+
 
   // Small refresh button near availability (requested)
   if (refreshNamesBtn) refreshNamesBtn.onclick = async () => {
@@ -615,7 +645,7 @@ async function renderMatchDetail(root, code) {
     refreshNamesBtn.disabled = false;
     if (fresh && fresh.length) {
       allPlayers = fresh;
-      renderDatalist(nameInput?.value || "");
+      renderDropdown(nameInput?.value || "");
     }
   };
 
@@ -623,7 +653,7 @@ async function renderMatchDetail(root, code) {
 
   async function submit(choice) {
     const playerName = String(nameInput?.value || "").trim();
-    if (!playerName) return toastWarn("Type your name.");
+    if (!playerName) return toastWarn("Type and select your name.");
 
     const y = detail.querySelector("#btnYes");
     const n = detail.querySelector("#btnNo");
@@ -689,10 +719,12 @@ export async function renderMatchPage(root, query) {
 
   renderMatchList(root, seasonId, openMatches);
 
-  // Save active refs so we can re-check meta when the Match tab becomes visible again
+  // Save active refs for activation meta checks
   ACTIVE_MATCH.pageRoot = root;
-  ACTIVE_MATCH.listRoot = root.querySelector("#matchListView");
+  ACTIVE_MATCH.listRoot = root.querySelector('#matchListView');
   ACTIVE_MATCH.seasonId = seasonId;
+  // immediate check
+  setTimeout(scheduleMatchMetaCheck, 0);
 
   // Prefetch details for all cached open matches immediately (background)
   prefetchOpenMatchDetails(openMatches);
@@ -708,9 +740,5 @@ export async function renderMatchPage(root, query) {
     renderMatchList(root, sid, c?.matches || []);
     prefetchOpenMatchDetails(c?.matches || []);
     root.querySelector("#seasonBlock").innerHTML = seasonsSelectHtml(seasons, sid);
-
-    // Update active season for activation meta checks
-    ACTIVE_MATCH.seasonId = sid;
-    ACTIVE_MATCH.listRoot = root.querySelector("#matchListView");
   };
 }

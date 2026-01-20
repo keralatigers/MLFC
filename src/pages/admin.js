@@ -272,7 +272,7 @@ function matchRowHtml(m, view) {
 
 function renderAdminShell(root, view) {
   root.innerHTML = `
-    <div class="card">
+    <div class="card" id="adminHeaderCard">
       <div class="h1">Admin</div>
       <div class="small">Season selection is shared across all tabs.</div>
 
@@ -332,9 +332,22 @@ function renderAdminShell(root, view) {
   root.querySelector("#seasonMgmt").open = false;
 }
 
+function setAdminChromeVisible(root, visible) {
+  const display = visible ? "" : "none";
+  const header = root.querySelector("#adminHeaderCard");
+  const seasonMgmt = root.querySelector("#seasonMgmt");
+  const createMatch = root.querySelector("#createMatchCard");
+  if (header) header.style.display = display;
+  if (seasonMgmt) seasonMgmt.style.display = display;
+  if (createMatch) createMatch.style.display = display;
+}
+
 function renderListView(root, view) {
   const listArea = root.querySelector("#listArea");
   const manageArea = root.querySelector("#manageArea");
+
+  // When list view is visible, show admin chrome
+  setAdminChromeVisible(root, true);
 
   // Show list, hide manage (do not destroy DOM)
   listArea.style.display = "block";
@@ -362,6 +375,9 @@ function renderListView(root, view) {
 async function openManageView(root, code, routeToken, prevView) {
   const listArea = root.querySelector("#listArea");
   const manageArea = root.querySelector("#manageArea");
+
+  // In manage view, hide admin header / season mgmt / create match so only match management shows.
+  setAdminChromeVisible(root, false);
 
   // Hide list, show manage (do not destroy list DOM)
   listArea.style.display = "none";
@@ -699,8 +715,8 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
           <div class="small" style="margin-top:6px">${when} • ${m.type} • ${m.status}</div>
           <div class="small" style="margin-top:6px">${fromCache ? "Loaded from device cache." : "Loaded from API."}</div>
         </div>
-        <div class="row" style="gap:10px; flex-wrap:wrap">
-          <button class="btn gray" id="refreshManage">Refresh match data</button>
+        <div class="row" style="gap:10px">
+          <button class="btn gray" id="refreshMatch">Refresh</button>
           <button class="btn gray" id="backToList">Back</button>
         </div>
       </div>
@@ -721,29 +737,33 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
   `;
 
   manageArea.querySelector("#backToList").onclick = () => {
-    // Back to previous list view
-    location.hash = `#/admin?view=${encodeURIComponent(prevView || "open")}`;
+    // Show full admin page chrome and return to list view WITHOUT reloading the route.
+    const view = (prevView || "open").toLowerCase();
+    setAdminChromeVisible(root, true);
+    renderListView(root, view === "past" ? "past" : "open");
+
+    // Keep URL in sync but avoid triggering router work.
+    const base = location.href.split("#")[0];
+    history.replaceState(null, "", `${base}#/admin?view=${encodeURIComponent(view)}`);
   };
 
-  // Availability can be updated by players outside the admin screen.
-  // Provide a manual refresh to pull latest match data + availability so teams can be selected.
-  manageArea.querySelector("#refreshManage").onclick = async () => {
+  // Refresh match data so availability changes are reflected (e.g., after players submit).
+  manageArea.querySelector("#refreshMatch").onclick = async () => {
     if (!stillOnAdmin(routeToken)) return;
-    const btn = manageArea.querySelector("#refreshManage");
+
+    const btn = manageArea.querySelector("#refreshMatch");
     setDisabled(btn, true, "Refreshing…");
 
-    // Clear caches so fresh state is visible everywhere
+    // Bust caches so we don't re-render stale data
     clearPublicMatchDetailCache(m.publicCode);
     clearManageCache(m.publicCode);
 
     const fresh = await API.getPublicMatch(m.publicCode);
     setDisabled(btn, false);
+    if (!stillOnAdmin(routeToken)) return;
     if (!fresh.ok) return toastError(fresh.error || "Failed to refresh match");
 
     lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
-    // Keep public match cache in sync (match tab/captain may reuse it)
-    lsSet(`${LS_MATCH_DETAIL_PREFIX}${m.publicCode}`, { ts: now(), data: fresh });
-
     toastSuccess("Match refreshed.");
     renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
   };

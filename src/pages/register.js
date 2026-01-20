@@ -21,12 +21,18 @@ export async function renderRegisterPage(root) {
 
   root.querySelector("#btn").onclick = async () => {
     msgEl.textContent = "Submitting...";
-    const res = await API.registerPlayer(nameEl.value.trim(), phoneEl.value.trim());
+    const name = nameEl.value.replace(/\s+/g, " ").trim();
+    const phone = phoneEl.value.trim();
+    const res = await API.registerPlayer(name, phone);
     if (!res.ok) {
       msgEl.textContent = res.error || "Failed";
       return;
     }
-    msgEl.textContent = "Registered ✅ You can now select your name in match availability.";
+    if (res.existing) {
+      msgEl.textContent = "Already registered ✅ You can now select your name in match availability.";
+    } else {
+      msgEl.textContent = "Registered ✅ You can now select your name in match availability.";
+    }
     nameEl.value = "";
     phoneEl.value = "";
   };
