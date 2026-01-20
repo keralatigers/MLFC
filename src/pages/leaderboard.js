@@ -3,14 +3,13 @@ import { API } from "../api/endpoints.js";
 import { toastError, toastSuccess, toastInfo } from "../ui/toast.js";
 import { cleanupCaches } from "../cache_cleanup.js";
 import { getRouteToken } from "../router.js";
+import { lsGet, lsSet, lsDel } from "../storage.js";
 
 const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
 const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1";
 const LS_LB_PREFIX = "mlfc_leaderboard_v2:"; // + seasonId => {ts,data}
 
 function now(){ return Date.now(); }
-function lsGet(k){ try{return JSON.parse(localStorage.getItem(k)||"null");}catch{return null;} }
-function lsSet(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch{} }
 
 function lbKey(seasonId){ return `${LS_LB_PREFIX}${seasonId}`; }
 
@@ -148,7 +147,7 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
   root.querySelector("#sortRating").onclick = () => { sortMode = "rating"; renderTable(root, rows, sortMode); };
 
   root.querySelector("#clearCache").onclick = () => {
-    localStorage.removeItem(lbKey(seasonId));
+    lsDel(lbKey(seasonId));
     rows = [];
     renderTable(root, rows, sortMode);
     toastInfo("Leaderboard cache cleared.");

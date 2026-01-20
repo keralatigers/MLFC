@@ -609,3 +609,208 @@ a:hover { text-decoration: underline; }
 .page { padding: 12px; }
 
 .compactBtn { padding: 8px 8px !important; border-radius: 10px !important; width: 92px !important; font-size: 12px !important; }
+
+
+/* =========================
+   Admin Internal Setup (mobile)
+   ========================= */
+
+/* Scrollable player assignment list (so team list below stays visible) */
+.assignList {
+  max-height: 56vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 6px;
+}
+
+/* Player assignment card */
+.assignCard {
+  background: rgba(255,255,255,0.94);
+  border: 1px solid rgba(11,18,32,0.10);
+  border-radius: 18px;
+  padding: 10px 10px;
+  box-shadow: 0 10px 26px rgba(0,0,0,0.10);
+  margin: 10px 0;
+}
+
+.assignCard__head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.assignCard__name {
+  font-weight: 950;
+  font-size: 14px;
+  line-height: 1.15;
+  margin: 0;
+}
+
+.assignCard__meta {
+  font-size: 12px;
+  font-weight: 900;
+  color: rgba(11,18,32,0.62);
+  margin-top: 2px;
+}
+
+/* Tiny team badge */
+.assignBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 74px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 950;
+  border: 1px solid rgba(11,18,32,0.10);
+  background: rgba(11,18,32,0.06);
+  color: rgba(11,18,32,0.72);
+  white-space: nowrap;
+}
+.assignBadge--blue {
+  background: rgba(14,165,233,0.14);
+  border-color: rgba(14,165,233,0.22);
+  color: rgba(2,132,199,0.92);
+}
+.assignBadge--orange {
+  background: rgba(245,158,11,0.18);
+  border-color: rgba(245,158,11,0.22);
+  color: rgba(155,97,0,0.92);
+}
+
+/* Compact button row */
+.assignBtns {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* Smaller buttons for this section */
+.btn.tiny {
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  width: auto;
+}
+
+@media (max-width: 520px) {
+  .assignBtns .btn { width: auto; }
+}
+
+/* Lightweight clear button */
+.btn.ghost {
+  color: rgba(11,18,32,0.78);
+  background: rgba(11,18,32,0.06);
+  border: 1px solid rgba(11,18,32,0.10);
+  box-shadow: none;
+}
+
+/* Compact team lists */
+.teamMini { margin-top: 10px; }
+
+.teamMini__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 0 6px;
+}
+
+.teamMini__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 950;
+  font-size: 12px;
+  color: rgba(11,18,32,0.86);
+}
+
+.teamMini__count {
+  font-size: 12px;
+  font-weight: 950;
+  color: rgba(11,18,32,0.62);
+}
+
+.teamMini__list { display: grid; gap: 6px; }
+
+.teamMiniRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(11,18,32,0.08);
+  background: rgba(11,18,32,0.03);
+}
+
+.teamMiniRow__name {
+  font-weight: 900;
+  font-size: 13px;
+  color: rgba(11,18,32,0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teamMiniRow__x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(11,18,32,0.10);
+  background: rgba(255,255,255,0.9);
+  color: rgba(11,18,32,0.72);
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.teamMiniRow__x:active { transform: translateY(1px) scale(0.99); }
+
+/* =========================
+   End Admin Internal Setup
+   ========================= */
+
+   /* =========================
+   Admin captain checkbox overlap fix
+   ========================= */
+
+/* Reserve space on the right so the X button never covers controls */
+.teamMiniRow{
+  padding-right: 44px; /* space for the X */
+}
+
+/* Put the X in a consistent spot (center right) */
+.teamMiniRow__x{
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+/* Make captain control compact and never sit under the X */
+.teamMiniRow__cap{
+  padding-right: 8px;
+}
+.teamMiniRow__cap label{
+  gap: 6px;
+}
+.teamMiniRow__cap input[type="checkbox"]{
+  transform: scale(1.05);
+  accent-color: var(--accent, #3b82f6);
+}
+
+/* If you use a "Captain" text, make it shorter on tiny screens */
+@media (max-width: 360px){
+  .teamMiniRow__cap label{
+    font-size: 11px;
+  }
+}

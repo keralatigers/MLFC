@@ -595,11 +595,20 @@ function bindHeaderButtons(root, routeToken) {
 }
 
 function bindListButtons(root, view) {
-  // Manage -> separate view; pass prev so Back is instant and consistent
+  // Manage
+  // IMPORTANT: Don't rely solely on hashchange to open manage.
+  // If the user previously opened the same match, setting the same hash may not trigger router work
+  // depending on browser behavior + replaceState usage. So we open manage directly and then update URL.
   root.querySelectorAll('[data-manage]:not([disabled])').forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
+      const routeToken = window.__mlfcAdminToken;
+      if (!stillOnAdmin(routeToken)) return;
+
       const code = btn.getAttribute("data-manage");
-      location.hash = `#/admin?view=manage&code=${encodeURIComponent(code)}&prev=${encodeURIComponent(view)}`;
+      await openManageView(root, code, routeToken, view);
+
+      // Update URL for shareability, but avoid depending on router.
+      history.replaceState(null, "", `${baseUrl()}#/admin?view=manage&code=${encodeURIComponent(code)}&prev=${encodeURIComponent(view)}`);
     };
   });
 
@@ -912,9 +921,10 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
   let captainBlue = String(captains.captain1 || "");
   let captainOrange = String(captains.captain2 || "");
 
+  // Links can be generated as soon as we know the captain names (no need to wait for Save setup).
+  const blueUrl = captainBlue ? captainLink(m.publicCode, captainBlue) : "";
+  const orangeUrl = captainOrange ? captainLink(m.publicCode, captainOrange) : "";
   const hasSavedSetup = (blue.length + orange.length) > 0 && !!captainBlue && !!captainOrange;
-  const blueUrl = hasSavedSetup ? captainLink(m.publicCode, captainBlue) : "";
-  const orangeUrl = hasSavedSetup ? captainLink(m.publicCode, captainOrange) : "";
 
   function assignedTeam(p) {
     if (blue.includes(p)) return "BLUE";
@@ -947,32 +957,22 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
       <summary style="font-weight:950">Internal setup</summary>
 
       <div class="small" style="margin-top:8px">
-        Assign available players to Blue/Orange. Remove re-enables selection buttons.
+        Assign available players to Blue/Orange. You can change teams anytime. Tap <b>Clear</b> to unassign.
       </div>
 
-      <div style="margin-top:12px; overflow:auto; border-radius:14px; border:1px solid rgba(11,18,32,0.10)">
-        <table style="width:100%; border-collapse:collapse; min-width:520px">
-          <thead>
-            <tr style="background: rgba(11,18,32,0.04)">
-              <th style="text-align:left; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Player</th>
-              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Blue</th>
-              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Orange</th>
-              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Status</th>
-            </tr>
-          </thead>
-          <tbody id="teamTableBody"></tbody>
-        </table>
+      <div style="margin-top:12px">
+        <div id="teamAssignList" class="assignList"></div>
       </div>
 
       <div class="hr"></div>
 
-      <div class="row" style="gap:14px; align-items:flex-start">
+      <div class="row" style="gap:14px; align-items:flex-start; flex-wrap:wrap">
         <div style="flex:1; min-width:260px">
-          <div class="badge">BLUE</div>
+          <div class="badge assignBadge--blue">BLUE - <span id="blueCount">0</span></div>
           <div id="blueList" style="margin-top:10px"></div>
         </div>
         <div style="flex:1; min-width:260px">
-          <div class="badge">ORANGE</div>
+          <div class="badge assignBadge--orange">ORANGE - <span id="orangeCount">0</span></div>
           <div id="orangeList" style="margin-top:10px"></div>
         </div>
       </div>
@@ -988,62 +988,81 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
 
     <details class="card" open>
       <summary style="font-weight:950">Captain links</summary>
-      ${
-        hasSavedSetup
-          ? `
-          <div class="row" style="align-items:flex-start; justify-content:space-between; margin-top:10px">
-            <div style="flex:1; min-width:0">
-              <div class="small"><b>Blue captain:</b> ${captainBlue}</div>
-              <div class="small" style="word-break:break-all">${blueUrl}</div>
-            </div>
-            <button class="btn primary" id="shareBlueCap">Share</button>
-          </div>
 
-          <div class="hr"></div>
+      <div class="row" style="align-items:flex-start; justify-content:space-between; margin-top:10px; gap:10px; flex-wrap:wrap">
+        <div style="flex:1; min-width:0">
+          <div class="small"><b>Blue captain:</b> <span id="capBlueName">${captainBlue || "(not selected)"}</span></div>
+          <div class="small" id="capBlueUrl" style="word-break:break-all">${captainBlue ? captainLink(m.publicCode, captainBlue) : ""}</div>
+        </div>
+        <button class="btn primary" id="shareBlueCap" ${captainBlue ? "" : "disabled"}>Share</button>
+      </div>
 
-          <div class="row" style="align-items:flex-start; justify-content:space-between">
-            <div style="flex:1; min-width:0">
-              <div class="small"><b>Orange captain:</b> ${captainOrange}</div>
-              <div class="small" style="word-break:break-all">${orangeUrl}</div>
-            </div>
-            <button class="btn primary" id="shareOrangeCap">Share</button>
-          </div>
-          `
-          : `<div class="small" style="margin-top:10px">Save setup to generate captain links.</div>`
-      }
+      <div class="hr"></div>
+
+      <div class="row" style="align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap">
+        <div style="flex:1; min-width:0">
+          <div class="small"><b>Orange captain:</b> <span id="capOrangeName">${captainOrange || "(not selected)"}</span></div>
+          <div class="small" id="capOrangeUrl" style="word-break:break-all">${captainOrange ? captainLink(m.publicCode, captainOrange) : ""}</div>
+        </div>
+        <button class="btn primary" id="shareOrangeCap" ${captainOrange ? "" : "disabled"}>Share</button>
+      </div>
+
+      <div class="small" id="capLinksTip" style="margin-top:10px">Links are available immediately. Tap <b>Save setup</b> to persist teams/captains.</div>
     </details>
   `;
 
-  function renderTeamTable() {
-    const tbody = manageBody.querySelector("#teamTableBody");
+  // Mobile-friendly assignment UI: no horizontal scrolling, and team can be changed directly.
+  function renderTeamAssignList() {
+    const box = manageBody.querySelector("#teamAssignList");
+    if (!box) return;
 
-    tbody.innerHTML = yesPlayers.map(p => {
+    if (!yesPlayers.length) {
+      box.innerHTML = `<div class="card"><div class="small">No available players yet.</div></div>`;
+      return;
+    }
+
+    box.innerHTML = yesPlayers.map(p => {
       const a = assignedTeam(p);
-      const blueDisabled = (a === "ORANGE") || isEditLocked;
-      const orangeDisabled = (a === "BLUE") || isEditLocked;
-      const statusText = a || "Unassigned";
+      const badgeCls = a === "BLUE" ? "assignBadge assignBadge--blue"
+        : a === "ORANGE" ? "assignBadge assignBadge--orange"
+        : "assignBadge";
+      const badgeText = a ? a : "UNASSIGNED";
+
+      const blueActive = a === "BLUE" ? "primary" : "gray";
+      const orangeActive = a === "ORANGE" ? "primary" : "gray";
 
       return `
-        <tr style="border-top:1px solid rgba(11,18,32,0.06)">
-          <td style="padding:8px; font-size:13px; font-weight:900; color: rgba(11,18,32,0.90)">${p}</td>
-          <td style="padding:8px; text-align:center">
-            <button class="btn good compactBtn" data-team-btn="BLUE" data-player="${encodeURIComponent(p)}" ${blueDisabled ? "disabled" : ""}>Blue</button>
-          </td>
-          <td style="padding:8px; text-align:center">
-            <button class="btn warn compactBtn" data-team-btn="ORANGE" data-player="${encodeURIComponent(p)}" ${orangeDisabled ? "disabled" : ""}>Orange</button>
-          </td>
-          <td style="padding:8px; text-align:center">
-            <span class="badge">${statusText}</span>
-          </td>
-        </tr>
-      `;
-    }).join("") || `<tr><td class="small" style="padding:10px" colspan="4">No available players yet.</td></tr>`;
+        <div class="assignCard">
+          <div class="assignCard__head">
+            <div style="min-width:0">
+              <div class="assignCard__name">${p}</div>
+              <div class="assignCard__meta">Assigned: <b>${badgeText}</b></div>
+            </div>
+            <div class="${badgeCls}">${badgeText}</div>
+          </div>
 
-    tbody.querySelectorAll("[data-team-btn]").forEach(b => {
+          <div class="assignBtns">
+            <button class="btn ${blueActive} tiny" data-team-btn="BLUE" data-player="${encodeURIComponent(p)}" ${isEditLocked ? "disabled" : ""}>Blue</button>
+            <button class="btn ${orangeActive} tiny" data-team-btn="ORANGE" data-player="${encodeURIComponent(p)}" ${isEditLocked ? "disabled" : ""}>Orange</button>
+            <button class="btn ghost tiny" data-remove="${encodeURIComponent(p)}" ${isEditLocked ? "disabled" : ""} ${a ? "" : "disabled"}>Clear</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    box.querySelectorAll("[data-team-btn]").forEach(b => {
       b.onclick = () => {
         const team = b.getAttribute("data-team-btn");
         const p = decodeURIComponent(b.getAttribute("data-player"));
         setTeam(p, team);
+        renderAll();
+      };
+    });
+
+    box.querySelectorAll("[data-remove]").forEach(b => {
+      b.onclick = () => {
+        const p = decodeURIComponent(b.getAttribute("data-remove"));
+        removeFromTeam(p);
         renderAll();
       };
     });
@@ -1052,6 +1071,11 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
   function renderLists() {
     const blueEl = manageBody.querySelector("#blueList");
     const orangeEl = manageBody.querySelector("#orangeList");
+    const blueCountEl = manageBody.querySelector("#blueCount");
+    const orangeCountEl = manageBody.querySelector("#orangeCount");
+
+    if (blueCountEl) blueCountEl.textContent = String(blue.length);
+    if (orangeCountEl) orangeCountEl.textContent = String(orange.length);
 
     function listHtml(players, teamName) {
       if (!players.length) return `<div class="small">No players yet.</div>`;
@@ -1059,15 +1083,17 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
         const isCap = (teamName === "BLUE" ? captainBlue === p : captainOrange === p);
         const disabled = isEditLocked ? "disabled" : "";
         return `
-          <div class="playerRow" style="display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px dashed rgba(11,18,32,0.10)">
-            <div class="small" style="font-weight:950; min-width:0">${p}</div>
-            <div class="row" style="gap:10px; align-items:center; justify-content:flex-end; flex-wrap:wrap">
+          <div class="teamMiniRow">
+            <div class="teamMiniRow__name" title="${p}">${p}</div>
+
+            <div class="teamMiniRow__cap">
               <label class="small" style="display:flex; gap:6px; align-items:center">
                 <input type="checkbox" data-cap="${teamName}" data-player="${encodeURIComponent(p)}" ${isCap ? "checked" : ""} ${disabled}/>
                 Captain
               </label>
-              <button class="btn gray" data-remove="${encodeURIComponent(p)}" style="padding:8px 10px; border-radius:12px" ${disabled}>Remove</button>
             </div>
+
+            <button class="teamMiniRow__x" data-remove="${encodeURIComponent(p)}" ${disabled} aria-label="Remove ${p}">×</button>
           </div>
         `;
       }).join("");
@@ -1098,8 +1124,26 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
   function renderAll() {
     blue = uniqueSorted(blue);
     orange = uniqueSorted(orange);
-    renderTeamTable();
+    renderTeamAssignList();
     renderLists();
+
+    // Update captain link UI live (captains can change before Save)
+    const blueNameEl = manageBody.querySelector("#capBlueName");
+    const orangeNameEl = manageBody.querySelector("#capOrangeName");
+    const blueUrlEl = manageBody.querySelector("#capBlueUrl");
+    const orangeUrlEl = manageBody.querySelector("#capOrangeUrl");
+    const shareBlueBtn = manageBody.querySelector("#shareBlueCap");
+    const shareOrangeBtn = manageBody.querySelector("#shareOrangeCap");
+
+    const liveBlueUrl = captainBlue ? captainLink(m.publicCode, captainBlue) : "";
+    const liveOrangeUrl = captainOrange ? captainLink(m.publicCode, captainOrange) : "";
+
+    if (blueNameEl) blueNameEl.textContent = captainBlue || "(not selected)";
+    if (orangeNameEl) orangeNameEl.textContent = captainOrange || "(not selected)";
+    if (blueUrlEl) blueUrlEl.textContent = liveBlueUrl;
+    if (orangeUrlEl) orangeUrlEl.textContent = liveOrangeUrl;
+    if (shareBlueBtn) shareBlueBtn.disabled = !liveBlueUrl;
+    if (shareOrangeBtn) shareOrangeBtn.disabled = !liveOrangeUrl;
 
     const shareBtn = manageBody.querySelector("#shareTeams");
     if (shareBtn) {

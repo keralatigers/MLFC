@@ -1,12 +1,10 @@
 // src/pages/captain.js
 import { API } from "../api/endpoints.js";
 import { toastSuccess, toastError, toastInfo, toastWarn } from "../ui/toast.js";
+import { lsGet, lsSet } from "../storage.js";
 
 const LS_CAPTAIN_ROSTER_PREFIX = "mlfc_captain_roster_v1:"; // + code + captain
 const LS_CAPTAIN_TEAMS_PREFIX = "mlfc_captain_teams_v1:";   // + code
-
-function lsGet(k){ try{return JSON.parse(localStorage.getItem(k)||"null");}catch{return null;} }
-function lsSet(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch{} }
 
 function rosterKey(code, captain){ return `${LS_CAPTAIN_ROSTER_PREFIX}${code}:${captain.toLowerCase()}`; }
 function teamsKey(code){ return `${LS_CAPTAIN_TEAMS_PREFIX}${code}`; }

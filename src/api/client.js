@@ -8,6 +8,10 @@ import { CONFIG } from "../config.js";
 let inflight = 0;
 let showTimer = null;
 
+// Request de-duplication (GET only)
+// If multiple callers request the same URL concurrently, reuse the same promise.
+const INFLIGHT_GET = new Map(); // url -> Promise
+
 function setVisible(visible) {
   const el = document.getElementById("loadingbar");
   if (!el) return;
@@ -39,22 +43,35 @@ function loadingEnd() {
 }
 
 export async function apiGet(params) {
-  loadingStart();
   try {
     const url = new URL(CONFIG.API_BASE);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+    const key = url.toString();
 
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      cache: "no-store",
-      credentials: "omit",
-    });
+    // De-dupe: if same request is already running, return its promise.
+    if (INFLIGHT_GET.has(key)) return await INFLIGHT_GET.get(key);
 
-    return await res.json();
+    const p = (async () => {
+      loadingStart();
+      try {
+        const res = await fetch(key, {
+          method: "GET",
+          cache: "no-store",
+          credentials: "omit",
+        });
+        return await res.json();
+      } catch (e) {
+        return { ok: false, error: String(e?.message || e) };
+      } finally {
+        loadingEnd();
+        INFLIGHT_GET.delete(key);
+      }
+    })();
+
+    INFLIGHT_GET.set(key, p);
+    return await p;
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
-  } finally {
-    loadingEnd();
   }
 }
 
@@ -84,4 +101,3 @@ export async function apiPost(body) {
     loadingEnd();
   }
 }
-

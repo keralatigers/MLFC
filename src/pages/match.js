@@ -29,10 +29,12 @@ function isMatchRouteActive() {
   return hash.startsWith("#/match");
 }
 
-function scheduleMatchMetaCheck() {
-  // throttle to avoid hammering slow API
+function scheduleMatchMetaCheck(reason = "") {
+  // Backend-protection: only check meta when the Match tab is (re)entered.
+  // Avoid calling frequently (no polling, no focus spam).
   const t = now();
-  if (t - MATCH_META_LAST_CHECK < 3000) return;
+  const cooldown = reason === "load" || reason === "tab" ? 0 : 15000;
+  if (t - MATCH_META_LAST_CHECK < cooldown) return;
   MATCH_META_LAST_CHECK = t;
 
   if (!ACTIVE_MATCH.pageRoot || !ACTIVE_MATCH.listRoot || !ACTIVE_MATCH.seasonId) return;
@@ -50,21 +52,12 @@ function ensureMatchMetaActivationListeners() {
   if (MATCH_META_LISTENERS_INSTALLED) return;
   MATCH_META_LISTENERS_INSTALLED = true;
 
-  // Runs when user navigates back to #/match (even if router skips re-render)
+  // Runs when user navigates to #/match (tab click). Router may skip re-render
+  // if the hash is unchanged, but hashchange still fires when the user switches tabs.
   window.addEventListener("hashchange", () => {
-    setTimeout(scheduleMatchMetaCheck, 0);
+    // Only treat this as a "tab enter" when the match route is active.
+    if (isMatchRouteActive()) setTimeout(() => scheduleMatchMetaCheck("tab"), 0);
   });
-  // Runs when user switches back to the app/tab
-  window.addEventListener("focus", () => setTimeout(scheduleMatchMetaCheck, 0));
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) setTimeout(scheduleMatchMetaCheck, 0);
-  });
-
-  // Fallback: if your tab UI only hides/shows containers (no hash change),
-  // this periodic check ensures we still detect new matches.
-  setInterval(() => {
-    if (isMatchRouteActive()) scheduleMatchMetaCheck();
-  }, 4000);
 }
 
 
@@ -725,8 +718,8 @@ export async function renderMatchPage(root, query) {
   ACTIVE_MATCH.pageRoot = root;
   ACTIVE_MATCH.listRoot = root.querySelector('#matchListView');
   ACTIVE_MATCH.seasonId = seasonId;
-  // immediate check
-  setTimeout(scheduleMatchMetaCheck, 0);
+  // Meta check only on initial load / tab enter (backend-friendly)
+  setTimeout(() => scheduleMatchMetaCheck("load"), 0);
 
   // Prefetch details for all cached open matches immediately (background)
   prefetchOpenMatchDetails(openMatches);
@@ -742,5 +735,10 @@ export async function renderMatchPage(root, query) {
     renderMatchList(root, sid, c?.matches || []);
     prefetchOpenMatchDetails(c?.matches || []);
     root.querySelector("#seasonBlock").innerHTML = seasonsSelectHtml(seasons, sid);
+
+    // Update active season and run a single meta check for the new season.
+    ACTIVE_MATCH.seasonId = sid;
+    ACTIVE_MATCH.listRoot = root.querySelector('#matchListView');
+    setTimeout(() => scheduleMatchMetaCheck("load"), 0);
   };
 }

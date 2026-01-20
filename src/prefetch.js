@@ -8,6 +8,7 @@
 // - Prefetch must use the same cache keys/shapes as the pages.
 
 import { API } from "./api/endpoints.js";
+import { lsGet, lsSet } from "./storage.js";
 
 const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1"; // {ts,data}
 const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
@@ -31,8 +32,6 @@ const TTL = {
 };
 
 function now() { return Date.now(); }
-function lsGet(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch { return null; } }
-function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 
 function isFresh(obj, ttlMs) {
   return !!(obj?.ts && (now() - obj.ts) < ttlMs);
