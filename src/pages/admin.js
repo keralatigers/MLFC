@@ -699,7 +699,10 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
           <div class="small" style="margin-top:6px">${when} • ${m.type} • ${m.status}</div>
           <div class="small" style="margin-top:6px">${fromCache ? "Loaded from device cache." : "Loaded from API."}</div>
         </div>
-        <button class="btn gray" id="backToList">Back</button>
+        <div class="row" style="gap:10px; flex-wrap:wrap">
+          <button class="btn gray" id="refreshManage">Refresh match data</button>
+          <button class="btn gray" id="backToList">Back</button>
+        </div>
       </div>
 
       <div class="small" style="margin-top:10px">Match link:</div>
@@ -718,8 +721,31 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
   `;
 
   manageArea.querySelector("#backToList").onclick = () => {
-    // Back to previous list view without API
+    // Back to previous list view
     location.hash = `#/admin?view=${encodeURIComponent(prevView || "open")}`;
+  };
+
+  // Availability can be updated by players outside the admin screen.
+  // Provide a manual refresh to pull latest match data + availability so teams can be selected.
+  manageArea.querySelector("#refreshManage").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
+    const btn = manageArea.querySelector("#refreshManage");
+    setDisabled(btn, true, "Refreshing…");
+
+    // Clear caches so fresh state is visible everywhere
+    clearPublicMatchDetailCache(m.publicCode);
+    clearManageCache(m.publicCode);
+
+    const fresh = await API.getPublicMatch(m.publicCode);
+    setDisabled(btn, false);
+    if (!fresh.ok) return toastError(fresh.error || "Failed to refresh match");
+
+    lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
+    // Keep public match cache in sync (match tab/captain may reuse it)
+    lsSet(`${LS_MATCH_DETAIL_PREFIX}${m.publicCode}`, { ts: now(), data: fresh });
+
+    toastSuccess("Match refreshed.");
+    renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
   };
 
   manageArea.querySelector("#shareMatch").onclick = () => {
