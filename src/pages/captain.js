@@ -52,6 +52,24 @@ function initialRosterFromAvailability(avail) {
   return uniqueSorted([...yes, ...maybe]);
 }
 
+
+
+function normalizeNameForCompare(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+function inferCaptainTeamFromMatch(data, captainName) {
+  // For INTERNAL matches: captains.captain1 = Blue captain, captains.captain2 = Orange captain (per admin setup)
+  try {
+    const cap = normalizeNameForCompare(captainName);
+    const c1 = normalizeNameForCompare(data?.captains?.captain1);
+    const c2 = normalizeNameForCompare(data?.captains?.captain2);
+    if (cap && c1 && cap == c1) return "BLUE";
+    if (cap && c2 && cap == c2) return "ORANGE";
+  } catch {}
+  return "";
+}
+
 export async function renderCaptainPage(root, query) {
   const code = query.get("code");
   const captain = (query.get("captain") || "").trim();
@@ -74,6 +92,7 @@ export async function renderCaptainPage(root, query) {
   const type = String(m.type || "").toUpperCase();
   const status = String(m.status || "").toUpperCase();
   const locked = String(m.ratingsLocked || "").toUpperCase() === "TRUE";
+  const captainTeam = (type === "INTERNAL") ? inferCaptainTeamFromMatch(data, captain) : "";
   const when = formatHumanDateTime(m.date, m.time);
 
   if (locked || status === "COMPLETED") {
@@ -158,6 +177,7 @@ export async function renderCaptainPage(root, query) {
     <div class="card">
       <div class="h1">Roster</div>
       <div class="small">Roster starts from YES/MAYBE availability. Add more players if someone joins late.</div>
+      ${type === "INTERNAL" && captainTeam ? `<div class="small" style="margin-top:8px"><b>Rule:</b> You can only rate <b>${captainTeam === "BLUE" ? "Orange" : "Blue"}</b> players. Swap players between teams if needed.</div>` : ""}
 
       <details class="card" style="margin-top:10px">
         <summary style="font-weight:950">Players who posted availability (${postedPlayers.length})</summary>
@@ -236,6 +256,7 @@ export async function renderCaptainPage(root, query) {
 
     bodyEl.innerHTML = list.map(p => {
       const tm = (teamMap[p] || "BLUE").toUpperCase();
+      const canRate = !(type === "INTERNAL" && captainTeam && tm === captainTeam);
       return `
         <tr style="border-top:1px solid rgba(11,18,32,0.06)">
           <td style="padding:10px; font-weight:950">${p}</td>
@@ -248,7 +269,9 @@ export async function renderCaptainPage(root, query) {
           </td>
 
           <td style="padding:10px; text-align:center">
-            <input class="input" data-rating="${encodeURIComponent(p)}" type="number" min="1" max="10" placeholder="1-10"
+            <input class="input" data-rating="${encodeURIComponent(p)}" type="number" min="1" max="10"
+              ${type === "INTERNAL" && captainTeam && tm === captainTeam ? 'disabled title="You can only rate opponent team"' : ''}
+              placeholder="${type === "INTERNAL" && captainTeam && tm === captainTeam ? 'Opponent only' : '1-10'}"
               style="width:110px; text-align:center" />
           </td>
 
@@ -304,14 +327,31 @@ export async function renderCaptainPage(root, query) {
 
     const inputs = root.querySelectorAll("[data-rating]");
     const rows = [];
+    const invalid = [];
+
     inputs.forEach(inp => {
       const p = decodeURIComponent(inp.getAttribute("data-rating"));
       const val = Number(inp.value || 0);
       if (!(val >= 1 && val <= 10)) return;
+
+      // INTERNAL rule: captains can only rate opponent team players
+      const tm = String(teamMap[p] || "").toUpperCase();
+      if (type === "INTERNAL" && captainTeam && tm === captainTeam) {
+        invalid.push(p);
+        return;
+      }
+
       rows.push({ playerName: p, rating: val, teamAtMatch: teamMap[p] || "" });
     });
 
     if (!rows.length) return toastWarn("Enter at least one rating (1–10).");
+
+    if (invalid.length) {
+      return toastWarn(
+        `You can only rate ${captainTeam === "BLUE" ? "Orange" : "Blue"} players for an internal match. Clear ratings for: ${invalid.join(", ")}`
+      );
+    }
+
 
     setDisabled(btn, true, "Submitting…");
     msg.textContent = "Submitting…";
