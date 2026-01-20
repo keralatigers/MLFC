@@ -1,37 +1,35 @@
+// src/api/endpoints.js
 import { apiGet, apiPost } from "./client.js";
 
 export const API = {
-  ping: () => apiGet({ action: "ping" }),
+  // seasons
+  seasons: () => apiGet({ action: "seasons" }),
+  leaderboardSeason: (seasonId) => apiGet({ action: "leaderboard_season", seasonId }),
 
-  // public
+  // public matches (season-scoped)
+  publicOpenMatches: (seasonId) => apiGet({ action: "public_open_matches", seasonId }),
+  publicPastMatches: (seasonId, page, pageSize) => apiGet({ action: "public_past_matches", seasonId, page, pageSize }),
+  publicMatchesMeta: (seasonId) => apiGet({ action: "public_matches_meta", seasonId }),
+
+  // players / public match
   players: () => apiGet({ action: "players" }),
-  registerPlayer: (name, phone) => apiPost({ action:"register_player", name, phone }),
-
-  publicMatches: (page = 1, pageSize = 20) =>
-    apiGet({ action: "public_matches", page: String(page), pageSize: String(pageSize) }),
-
   getPublicMatch: (code) => apiGet({ action: "public_match", code }),
-
-  setAvailability: (publicCode, playerName, availability, note) =>
-    apiPost({ action:"set_availability", publicCode, playerName, availability, note }),
-
-  leaderboard: () => apiGet({ action:"leaderboard" }),
-publicMatchesMeta: () => apiGet({ action: "public_matches_meta" }),
+setAvailability: (code, playerName, availability) =>
+  apiPost({ action: "set_availability", code, playerName, availability }),
 
   // admin
-  adminListMatches: (adminKey) => apiGet({ action:"admin_list_matches", adminKey }),
-  adminCreateMatch: (adminKey, payload) => apiPost({ action:"admin_create_match", adminKey, ...payload }),
-  adminCloseMatch: (adminKey, matchId) => apiPost({ action:"admin_close_match", adminKey, matchId }),
-  adminLockRatings: (adminKey, matchId) => apiPost({ action:"admin_lock_ratings", adminKey, matchId }),
-  adminUnlockMatch: (adminKey, matchId) => apiPost({ action:"admin_unlock_match", adminKey, matchId }),
-
-  adminSetupOpponent: (adminKey, payload) => apiPost({ action:"admin_setup_opponent", adminKey, ...payload }),
-  adminSetupInternal: (adminKey, payload) => apiPost({ action:"admin_setup_internal", adminKey, ...payload }),
+  adminListMatches: (adminKey, seasonId) => apiGet({ action: "admin_list_matches", adminKey, seasonId }),
+  adminCreateMatch: (adminKey, payload) => apiPost({ action: "admin_create_match", adminKey, ...payload }),
+  adminCreateSeason: (adminKey, payload) => apiPost({ action: "admin_create_season", adminKey, ...payload }),
+  adminLockRatings: (adminKey, matchId) => apiPost({ action: "admin_lock_ratings", adminKey, matchId }),
+  adminUnlockMatch: (adminKey, matchId) => apiPost({ action: "admin_unlock_match", adminKey, matchId }),
+  adminSetupInternal: (adminKey, payload) => apiPost({ action: "admin_setup_internal", adminKey, ...payload }),
+  adminSetupOpponent: (adminKey, payload) => apiPost({ action: "admin_setup_opponent", adminKey, ...payload }),
 
   // captain
-  captainSubmitRatingsBatch: (publicCode, givenBy, ratings) =>
-    apiPost({ action:"captain_submit_ratings_batch", publicCode, givenBy, ratings }),
+  captainSubmitScore: (code, captain, mode, a, b) =>
+    apiPost({ action: "captain_submit_score", code, captain, mode, scoreA: a, scoreB: b }),
 
-  captainSubmitScore: (publicCode, givenBy, team, scoreFor, scoreAgainst) =>
-    apiPost({ action:"captain_submit_score", publicCode, givenBy, team, scoreFor, scoreAgainst })
+  captainSubmitRatingsBatch: (code, captain, rows) =>
+    apiPost({ action: "captain_submit_ratings_batch", code, captain, rows }),
 };

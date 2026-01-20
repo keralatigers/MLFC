@@ -20,8 +20,8 @@ const STATIC_ASSETS = [
   "./src/pages/leaderboard.js",
   "./src/pages/admin.js",
   "./src/pages/captain.js",
-  "./assets/icons/icon-192.png",
-  "./assets/icons/icon-512.png"
+//   "./assets/icons/icon-192.png",
+//   "./assets/icons/icon-512.png"
 ];
 
 self.addEventListener("install", (event) => {

@@ -1,23 +1,32 @@
+// src/pages/admin.js
 import { API } from "../api/endpoints.js";
 import { toastSuccess, toastError, toastInfo, toastWarn } from "../ui/toast.js";
 import { cleanupCaches } from "../cache_cleanup.js";
 
 const LS_ADMIN_KEY = "mlfc_adminKey";
-const LS_ADMIN_MATCHES_CACHE = "mlfc_admin_matches_cache_ls_v1";
-const LS_MANAGE_CACHE_PREFIX = "mlfc_manage_cache_ls_v1:";
+const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
+const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1"; // {ts, data}
 
-const PAGE_SIZE = 20;
+const LS_ADMIN_MATCHES_PREFIX = "mlfc_admin_matches_cache_v3:"; // + seasonId => {ts, matches}
+const LS_MANAGE_CACHE_PREFIX = "mlfc_admin_manage_cache_v3:";   // + code => {ts, data}
+const LS_MATCH_DETAIL_PREFIX = "mlfc_match_detail_cache_v2:";   // shared with match page
+
+const SEASONS_TTL_MS = 60 * 10000;
 
 let MEM = {
   adminKey: null,
+  seasons: [],
+  selectedSeasonId: "",
   matches: [],
-  matchesTs: 0,
-  lastManagedCode: null,
-  lastManageData: null,
-  lastManageTs: 0
 };
 
 function now() { return Date.now(); }
+function currentHashPath() { return (location.hash || "#/match").split("?")[0]; }
+function currentHashQuery() { return new URLSearchParams(location.hash.split("?")[1] || ""); }
+function stillOnAdmin(routeToken) {
+  return currentHashPath() === "#/admin" && window.__mlfcAdminToken === routeToken;
+}
+
 function baseUrl() { return location.href.split("#")[0]; }
 function matchLink(publicCode) { return `${baseUrl()}#/match?code=${publicCode}`; }
 function captainLink(publicCode, captainName) {
@@ -27,20 +36,12 @@ function waOpenPrefill(text) {
   window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 }
 
-function lsGet(key) {
-  try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; }
-}
-function lsSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
+function lsGet(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; } }
+function lsSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+function lsDel(key) { try { localStorage.removeItem(key); } catch {} }
+
+function matchesKey(seasonId) { return `${LS_ADMIN_MATCHES_PREFIX}${seasonId}`; }
 function manageKey(code) { return `${LS_MANAGE_CACHE_PREFIX}${code}`; }
-function getManageCache(code) {
-  const obj = lsGet(manageKey(code));
-  return obj?.data || null;
-}
-function setManageCache(code, data) {
-  lsSet(manageKey(code), { ts: now(), data });
-}
 
 function setDisabled(btn, disabled, busyText) {
   if (!btn) return;
@@ -55,67 +56,126 @@ function uniqueSorted(arr) {
   return [...new Set(arr)].filter(Boolean).sort((a, b) => a.localeCompare(b));
 }
 
+function clearPublicMatchDetailCache(publicCode) {
+  try {
+    if (publicCode) localStorage.removeItem(`${LS_MATCH_DETAIL_PREFIX}${publicCode}`);
+  } catch {}
+}
+function clearManageCache(publicCode) {
+  try {
+    if (publicCode) localStorage.removeItem(manageKey(publicCode));
+  } catch {}
+}
+function clearAdminMatchesCache(seasonId) {
+  try {
+    if (seasonId) localStorage.removeItem(matchesKey(seasonId));
+  } catch {}
+}
+
+// Robust human formatter (prevents invalid display if browser parsing differs)
+function formatHumanDateTime(dateStr, timeStr) {
+  const d = String(dateStr || "").trim();
+  const t = String(timeStr || "").trim();
+  if (!d || !t) return `${d || "Unknown date"} ${t || ""}`.trim();
+
+  const m = t.match(/^(\d{1,2}):(\d{2})$/);
+  const hhmm = m ? `${String(m[1]).padStart(2, "0")}:${m[2]}` : t;
+
+  const dt = new Date(`${d}T${hhmm}:00`);
+  if (Number.isNaN(dt.getTime())) return `${d} ${hhmm}`;
+
+  return dt.toLocaleString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function getViewParams(query) {
-  const view = (query.get("view") || "open").toLowerCase(); // open | past
-  const page = Math.max(1, Number(query.get("page") || "1"));
-  return { view, page };
+  // views:
+  // - open (default)
+  // - past
+  // - manage (requires code)
+  const view = (query.get("view") || "open").toLowerCase();
+  const code = query.get("code") || "";
+  const prev = (query.get("prev") || "open").toLowerCase();
+  return { view, code, prev };
 }
 
-function loadMatchesFromLocal() {
-  const cached = lsGet(LS_ADMIN_MATCHES_CACHE);
-  if (cached?.matches && Array.isArray(cached.matches)) {
-    MEM.matches = cached.matches;
-    MEM.matchesTs = cached.ts || 0;
-  }
+async function loadSeasonsCached(routeToken) {
+  const cached = lsGet(LS_SEASONS_CACHE);
+  if (cached?.data?.ok && (now() - (cached.ts || 0)) <= SEASONS_TTL_MS) return cached.data;
+
+  const res = await API.seasons();
+  if (!stillOnAdmin(routeToken)) return { ok: false, error: "Route changed" };
+  if (res.ok) lsSet(LS_SEASONS_CACHE, { ts: now(), data: res });
+  return res;
 }
 
-async function refreshMatchesFromApi() {
-  const adminKey = MEM.adminKey || localStorage.getItem(LS_ADMIN_KEY);
-  if (!adminKey) return { ok: false, error: "Missing admin key" };
-  MEM.adminKey = adminKey;
+function pickSelectedSeason(seasonsRes) {
+  const seasons = seasonsRes.seasons || [];
+  const current = seasonsRes.currentSeasonId || "";
 
-  const res = await API.adminListMatches(adminKey);
-  if (!res.ok) return res;
+  let selected = localStorage.getItem(LS_SELECTED_SEASON) || "";
+  if (!seasons.some(s => s.seasonId === selected)) selected = current || seasons[0]?.seasonId || "";
+  if (selected) localStorage.setItem(LS_SELECTED_SEASON, selected);
 
-  MEM.matches = res.matches || [];
-  MEM.matchesTs = now();
-  lsSet(LS_ADMIN_MATCHES_CACHE, { ts: MEM.matchesTs, matches: MEM.matches });
-  return { ok: true, matches: MEM.matches };
+  return { seasons, selected, current };
 }
 
-function formatAdminMatches(matches, view) {
-  const open = (matches || []).filter(m => String(m.status || "").toUpperCase() === "OPEN");
-  open.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-
-  const past = (matches || []).filter(m => String(m.status || "").toUpperCase() !== "OPEN");
-  past.sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
-
-  return view === "past" ? past : open;
-}
-
-function adminNavHtml(view) {
-  const openActive = view === "open" ? "primary" : "gray";
-  const pastActive = view === "past" ? "primary" : "gray";
+function seasonsSelectHtml(seasons, selected) {
+  const opts = (seasons || []).map(s =>
+    `<option value="${s.seasonId}" ${s.seasonId === selected ? "selected" : ""}>${s.name}</option>`
+  ).join("");
   return `
-    <div class="row" style="margin-top:10px">
-      <button class="btn ${openActive}" id="goOpen">Open matches</button>
-      <button class="btn ${pastActive}" id="goPast">Past matches</button>
+    <div class="row" style="gap:10px; align-items:center; margin-top:10px">
+      <div class="small" style="min-width:64px"><b>Season</b></div>
+      <select class="input" id="seasonSelect" style="flex:1">${opts}</select>
     </div>
   `;
 }
 
+// Only called when user presses Refresh (no auto calls)
+async function refreshMatchesFromApi(seasonId, routeToken) {
+  const adminKey = MEM.adminKey || localStorage.getItem(LS_ADMIN_KEY);
+  if (!adminKey) return { ok: false, error: "Missing admin key" };
+  MEM.adminKey = adminKey;
+
+  const res = await API.adminListMatches(adminKey, seasonId);
+  if (!stillOnAdmin(routeToken)) return { ok: false, error: "Route changed" };
+  if (!res.ok) return res;
+
+  MEM.matches = res.matches || [];
+  lsSet(matchesKey(seasonId), { ts: now(), matches: MEM.matches });
+  return { ok: true, matches: MEM.matches };
+}
+
+// Cache-first load (no API)
+function loadMatchesFromLocal(seasonId) {
+  const cached = lsGet(matchesKey(seasonId));
+  if (cached?.matches && Array.isArray(cached.matches)) {
+    MEM.matches = cached.matches;
+    return true;
+  }
+  MEM.matches = [];
+  return false;
+}
+
 function renderLogin(root) {
   root.innerHTML = `
-    <div class="card">
-      <div class="h1">Admin</div>
-      <div class="small">Enter admin key once. It will be remembered on this device.</div>
+    <details class="card" open>
+      <summary style="font-weight:950">Admin Login</summary>
+      <div class="small" style="margin-top:8px">Enter admin key once. It will be remembered on this device.</div>
       <input id="key" class="input" placeholder="Admin key" style="margin-top:10px" />
       <div class="row" style="margin-top:10px">
         <button id="login" class="btn primary">Login</button>
         <button id="clear" class="btn gray">Clear key</button>
       </div>
       <div id="msg" class="small" style="margin-top:10px"></div>
-    </div>
+    </details>
   `;
 
   const keyEl = root.querySelector("#key");
@@ -124,135 +184,76 @@ function renderLogin(root) {
 
   root.querySelector("#clear").onclick = () => {
     localStorage.removeItem(LS_ADMIN_KEY);
-    localStorage.removeItem(LS_ADMIN_MATCHES_CACHE);
     toastInfo("Admin key cleared.");
     msgEl.textContent = "Cleared.";
   };
 
   root.querySelector("#login").onclick = async () => {
     const adminKey = keyEl.value.trim();
-    if (!adminKey) { toastWarn("Enter admin key"); return; }
+    if (!adminKey) return toastWarn("Enter admin key");
+
     setDisabled(root.querySelector("#login"), true, "Logging…");
     msgEl.textContent = "Logging in…";
 
-    const res = await API.adminListMatches(adminKey);
-    setDisabled(root.querySelector("#login"), false);
+    const routeToken = (window.__mlfcAdminToken = String(Math.random()));
+    const seasonsRes = await loadSeasonsCached(routeToken);
 
+    setDisabled(root.querySelector("#login"), false);
+    if (!seasonsRes.ok) {
+      msgEl.textContent = seasonsRes.error || "Failed seasons";
+      return toastError(seasonsRes.error || "Failed seasons");
+    }
+
+    const { seasons, selected } = pickSelectedSeason(seasonsRes);
+    MEM.seasons = seasons;
+    MEM.selectedSeasonId = selected;
+
+    // Validate key by calling admin list once
+    const res = await API.adminListMatches(adminKey, selected);
     if (!res.ok) {
       msgEl.textContent = res.error || "Unauthorized";
-      toastError(res.error || "Unauthorized");
-      return;
+      return toastError(res.error || "Unauthorized");
     }
 
     localStorage.setItem(LS_ADMIN_KEY, adminKey);
     MEM.adminKey = adminKey;
     MEM.matches = res.matches || [];
-    MEM.matchesTs = now();
-    lsSet(LS_ADMIN_MATCHES_CACHE, { ts: MEM.matchesTs, matches: MEM.matches });
+    lsSet(matchesKey(selected), { ts: now(), matches: MEM.matches });
 
     toastSuccess("Logged in.");
-    renderAdminShell(root);
+    location.hash = "#/admin?view=open";
   };
 }
 
-function renderAdminShell(root) {
-  const query = new URLSearchParams(location.hash.split("?")[1] || "");
-  const { view, page } = getViewParams(query);
-
-  root.innerHTML = `
-    <div class="card">
-      <div class="h1">Admin</div>
-      <div class="row" style="margin-top:10px">
-        <button id="refresh" class="btn primary">Refresh</button>
-        <button id="logout" class="btn gray">Logout</button>
-      </div>
-      ${adminNavHtml(view)}
-      <div class="small" id="msg" style="margin-top:10px"></div>
-    </div>
-    <div id="adminArea"></div>
-  `;
-
-  root.querySelector("#logout").onclick = () => {
-    localStorage.removeItem(LS_ADMIN_KEY);
-    toastInfo("Logged out.");
-    renderLogin(root);
-  };
-
-  root.querySelector("#refresh").onclick = async () => {
-    const btn = root.querySelector("#refresh");
-    const msg = root.querySelector("#msg");
-    setDisabled(btn, true, "Refreshing…");
-    msg.textContent = "Refreshing…";
-
-    const res = await refreshMatchesFromApi();
-
-    setDisabled(btn, false);
-    msg.textContent = "";
-
-    if (!res.ok) {
-      toastError(res.error || "Failed to refresh");
-      return;
-    }
-
-    toastSuccess("Refreshed.");
-    renderAdminArea(root.querySelector("#adminArea"), view, page);
-  };
-
-  root.querySelector("#goOpen").onclick = () => { location.hash = "#/admin"; };
-  root.querySelector("#goPast").onclick = () => { location.hash = "#/admin?view=past&page=1"; };
-
-  renderAdminArea(root.querySelector("#adminArea"), view, page);
-}
-
-function createMatchHtml() {
+function topNavHtml(view) {
+  const openActive = view === "open" ? "primary" : "gray";
+  const pastActive = view === "past" ? "primary" : "gray";
   return `
-    <div class="card" id="createCard">
-      <div class="h1">Create match</div>
-      <input id="title" class="input" placeholder="Title" />
-      <input id="date" class="input" type="date" style="margin-top:10px" />
-      <input id="time" class="input" type="time" value="19:00" style="margin-top:10px" />
-      <select id="type" class="input" style="margin-top:10px">
-        <option value="INTERNAL" selected>Internal (Blue vs Orange)</option>
-        <option value="OPPONENT">Against opponents (1 captain)</option>
-      </select>
-      <button id="create" class="btn primary" style="margin-top:10px">Create</button>
-      <div id="created" class="small" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+      <button class="btn ${openActive}" id="goOpen">Open matches</button>
+      <button class="btn ${pastActive}" id="goPast">Past matches</button>
     </div>
   `;
 }
 
-function pastPagerHtml(page, hasMore, total) {
-  const prevDisabled = page <= 1 ? "disabled" : "";
-  const nextDisabled = !hasMore ? "disabled" : "";
-  return `
-    <div class="row" style="margin-top:12px">
-      <button class="btn gray" id="prevPage" ${prevDisabled}>Prev</button>
-      <button class="btn gray" id="nextPage" ${nextDisabled}>Next</button>
-    </div>
-    <div class="small" style="margin-top:8px">Page ${page} • Total ${total}</div>
-  `;
-}
-
-function matchRowHtml(m) {
+function matchRowHtml(m, view) {
   const status = String(m.status || "").toUpperCase();
   const locked = String(m.ratingsLocked || "").toUpperCase() === "TRUE";
-
-  const isOpen = status === "OPEN";
   const isCompleted = status === "COMPLETED";
   const isEditLocked = locked || status === "CLOSED" || isCompleted;
 
-  // Rules you requested
+  // If locked/completed: disable Manage + Lock ratings
   const disableManage = isEditLocked;
   const disableLock = locked || isCompleted;
+
+  const when = formatHumanDateTime(m.date, m.time);
 
   return `
     <div style="padding:10px 0; border-bottom:1px solid #eee">
       <div class="row" style="justify-content:space-between">
         <div style="min-width:0">
-          <div style="font-weight:950; color: rgba(11,18,32,0.92)">
-            ${m.title}
-          </div>
-          <div class="small">${m.date} ${m.time} • ${m.type}</div>
+          <div style="font-weight:950; color: rgba(11,18,32,0.92)">${m.title}</div>
+          <div class="small">${when} • ${m.type}</div>
         </div>
         <div class="row" style="gap:6px">
           <span class="badge">${m.status}</span>
@@ -261,268 +262,554 @@ function matchRowHtml(m) {
       </div>
 
       <div class="row" style="margin-top:8px; flex-wrap:wrap">
-        <button
-          class="btn gray"
-          data-manage="${m.publicCode}"
-          ${disableManage ? "disabled" : ""}
-        >
-          Manage
-        </button>
-
-        ${
-          /* ONLY show for OPEN matches */
-          isOpen
-            ? `<button class="btn gray" data-close="${m.matchId}">
-                 Close availability
-               </button>`
-            : ""
-        }
-
-        <button
-          class="btn gray"
-          data-lock="${m.matchId}"
-          ${disableLock ? "disabled" : ""}
-        >
-          Lock ratings
-        </button>
-
-        ${
-          isEditLocked
-            ? `<button class="btn gray" data-unlock="${m.matchId}">
-                 Unlock match
-               </button>`
-            : ""
-        }
+        <button class="btn gray" data-manage="${m.publicCode}" ${disableManage ? "disabled" : ""}>Manage</button>
+        <button class="btn gray" data-lock="${m.matchId}" ${disableLock ? "disabled" : ""}>Lock ratings</button>
+        ${isEditLocked ? `<button class="btn gray" data-unlock="${m.matchId}">Unlock match</button>` : ""}
       </div>
     </div>
   `;
 }
 
-
-
-function renderAdminArea(adminArea, view, page) {
-  const showCreate = (view === "open");
-  const matches = formatAdminMatches(MEM.matches, view);
-
-  const total = matches.length;
-  const start = (page - 1) * PAGE_SIZE;
-  const items = matches.slice(start, start + PAGE_SIZE);
-  const hasMore = (start + PAGE_SIZE) < total;
-
-  adminArea.innerHTML = `
-    ${showCreate ? createMatchHtml() : ""}
-
+function renderAdminShell(root, view) {
+  root.innerHTML = `
     <div class="card">
-      <div class="h1">${view === "past" ? "Past matches" : "Open matches"}</div>
-      <div class="small">${view === "past" ? "Manage old matches here." : "Only matches seeking availability are shown here."}</div>
+      <div class="h1">Admin</div>
+      <div class="small">Season selection is shared across all tabs.</div>
 
-      <div id="matchesList" style="margin-top:10px">
-        ${items.length ? items.map(m => matchRowHtml(m)).join("") : `<div class="small" style="margin-top:10px">No matches.</div>`}
+      <div id="seasonBlock"></div>
+
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+        <button id="refresh" class="btn primary">Refresh</button>
+        <button id="logout" class="btn gray">Logout</button>
       </div>
 
-      ${view === "past" ? pastPagerHtml(page, hasMore, total) : ""}
+      ${topNavHtml(view)}
+
+      <div class="small" id="msg" style="margin-top:10px"></div>
     </div>
 
+    <details class="card" id="seasonMgmt">
+      <summary style="font-weight:950">Season management</summary>
+
+      <div class="small" style="margin-top:8px">
+        Create seasons like: <b>24 Winter</b>, <b>24-25 Summer</b>, <b>25 Winter</b>, <b>25-26 Summer</b>.
+      </div>
+
+      <input id="seasonName" class="input" placeholder="Season name (e.g., 25-26 Summer)" style="margin-top:10px" />
+      <div class="row" style="margin-top:10px">
+        <input id="seasonStart" class="input" type="date" style="flex:1" />
+        <input id="seasonEnd" class="input" type="date" style="flex:1" />
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="createSeason">Create season</button>
+      </div>
+
+      <div class="hr"></div>
+      <div class="h1">Seasons</div>
+      <div id="seasonList" class="small" style="margin-top:8px"></div>
+    </details>
+
+    <details class="card" id="createMatchCard" open>
+      <summary style="font-weight:950">Create match</summary>
+
+      <input id="title" class="input" placeholder="Title" style="margin-top:10px" />
+      <input id="date" class="input" type="date" style="margin-top:10px" />
+      <input id="time" class="input" type="time" value="19:00" style="margin-top:10px" />
+      <select id="type" class="input" style="margin-top:10px">
+        <option value="INTERNAL" selected>Internal (Blue vs Orange)</option>
+        <option value="OPPONENT">Against opponents (1 captain)</option>
+      </select>
+
+      <button id="createMatch" class="btn primary" style="margin-top:10px">Create</button>
+      <div id="created" class="small" style="margin-top:10px"></div>
+    </details>
+
+    <div id="listArea"></div>
     <div id="manageArea"></div>
   `;
 
-  if (showCreate) bindCreateMatch(adminArea);
-
-  bindListButtons(adminArea);
-
-  // restore manage if cached
-  if (MEM.lastManagedCode) {
-    const manageArea = adminArea.querySelector("#manageArea");
-    const cached = getManageCache(MEM.lastManagedCode) || MEM.lastManageData;
-    if (cached) renderManageView(manageArea, cached);
-  }
+  // Requested: Season management collapsed by default
+  root.querySelector("#seasonMgmt").open = false;
 }
 
-function bindCreateMatch(adminArea) {
-  adminArea.querySelector("#create").onclick = async () => {
-    const btn = adminArea.querySelector("#create");
+function renderListView(root, view) {
+  const listArea = root.querySelector("#listArea");
+  const manageArea = root.querySelector("#manageArea");
+
+  // Show list, hide manage (do not destroy DOM)
+  listArea.style.display = "block";
+  manageArea.style.display = "none";
+
+  const open = (MEM.matches || []).filter(m => String(m.status || "").toUpperCase() === "OPEN");
+  const past = (MEM.matches || []).filter(m => String(m.status || "").toUpperCase() !== "OPEN");
+
+  listArea.innerHTML = `
+    <div class="card">
+      <div class="h1">${view === "past" ? "Past matches" : "Open matches"}</div>
+      <div id="matchesList" style="margin-top:10px">
+        ${
+          (view === "past" ? past : open).length
+            ? (view === "past" ? past : open).map(m => matchRowHtml(m, view)).join("")
+            : `<div class="small">No matches.</div>`
+        }
+      </div>
+    </div>
+  `;
+
+  bindListButtons(root, view);
+}
+
+async function openManageView(root, code, routeToken, prevView) {
+  const listArea = root.querySelector("#listArea");
+  const manageArea = root.querySelector("#manageArea");
+
+  // Hide list, show manage (do not destroy list DOM)
+  listArea.style.display = "none";
+  manageArea.style.display = "block";
+
+  // Render from cache instantly if present
+  const cached = lsGet(manageKey(code));
+  if (cached?.data?.ok) {
+    renderManageUI(root, cached.data, routeToken, { fromCache: true, prevView });
+    return; // no auto fetch
+  }
+
+  // No cache: show loading, then fetch ONCE
+  manageArea.innerHTML = `<div class="card"><div class="h1">Loading match…</div><div class="small">Fetching details…</div></div>`;
+
+  const fresh = await API.getPublicMatch(code);
+  if (!stillOnAdmin(routeToken)) return;
+  if (!fresh.ok) {
+    manageArea.innerHTML = `<div class="card"><div class="h1">Error</div><div class="small">${fresh.error}</div></div>`;
+    return toastError(fresh.error || "Failed to load match");
+  }
+  lsSet(manageKey(code), { ts: now(), data: fresh });
+  renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
+}
+
+function bindTopNav(root, routeToken) {
+  root.querySelector("#goOpen").onclick = () => {
+    if (!stillOnAdmin(routeToken)) return;
+    location.hash = "#/admin?view=open";
+  };
+  root.querySelector("#goPast").onclick = () => {
+    if (!stillOnAdmin(routeToken)) return;
+    location.hash = "#/admin?view=past";
+  };
+}
+
+function bindSeasonSelector(root, routeToken) {
+  root.querySelector("#seasonBlock").innerHTML = seasonsSelectHtml(MEM.seasons, MEM.selectedSeasonId);
+  const select = root.querySelector("#seasonSelect");
+
+  select.onchange = () => {
+    if (!stillOnAdmin(routeToken)) return;
+
+    MEM.selectedSeasonId = select.value;
+    localStorage.setItem(LS_SELECTED_SEASON, MEM.selectedSeasonId);
+
+    // cache-first load matches for season (no API)
+    loadMatchesFromLocal(MEM.selectedSeasonId);
+
+    const { view } = getViewParams(currentHashQuery());
+
+    // If in manage and season changes, go back to open list for new season
+    if (view === "manage") {
+      location.hash = "#/admin?view=open";
+    } else {
+      renderListView(root, view);
+    }
+  };
+}
+
+function bindSeasonMgmt(root, routeToken) {
+  const listEl = root.querySelector("#seasonList");
+  listEl.innerHTML = (MEM.seasons || []).map(s => `• ${s.name} (${s.status}) ${s.startDate} → ${s.endDate}`).join("<br/>") || "No seasons yet.";
+
+  root.querySelector("#createSeason").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
+
+    const btn = root.querySelector("#createSeason");
+    const name = String(root.querySelector("#seasonName").value || "").trim();
+    const startDate = String(root.querySelector("#seasonStart").value || "").trim();
+    const endDate = String(root.querySelector("#seasonEnd").value || "").trim();
+    if (!name || !startDate || !endDate) return toastWarn("Enter season name + start/end date.");
+
+    setDisabled(btn, true, "Creating…");
+    const out = await API.adminCreateSeason(MEM.adminKey, { name, startDate, endDate });
+    setDisabled(btn, false);
+
+    if (!out.ok) return toastError(out.error || "Failed to create season");
+    toastSuccess("Season created.");
+
+    // Reload seasons list (cache bust)
+    lsDel(LS_SEASONS_CACHE);
+    const seasonsRes = await loadSeasonsCached(routeToken);
+    if (!stillOnAdmin(routeToken)) return;
+    if (!seasonsRes.ok) return toastError(seasonsRes.error || "Failed to reload seasons");
+
+    const picked = pickSelectedSeason(seasonsRes);
+    MEM.seasons = picked.seasons;
+
+    // Server will pick latest season as current; pickSelectedSeason respects that
+    MEM.selectedSeasonId = picked.selected;
+    localStorage.setItem(LS_SELECTED_SEASON, MEM.selectedSeasonId);
+
+    // No auto API for matches; clear old season cache so user chooses Refresh when needed
+    clearAdminMatchesCache(MEM.selectedSeasonId);
+    loadMatchesFromLocal(MEM.selectedSeasonId);
+
+    bindSeasonSelector(root, routeToken);
+    bindSeasonMgmt(root, routeToken);
+
+    // show open list from cache (likely empty until Refresh)
+    renderListView(root, "open");
+  };
+}
+
+function bindCreateMatch(root, routeToken) {
+  root.querySelector("#createMatch").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
+
+    const btn = root.querySelector("#createMatch");
     setDisabled(btn, true, "Creating…");
 
     const payload = {
-      title: adminArea.querySelector("#title").value.trim() || "Weekly Match",
-      date: adminArea.querySelector("#date").value,
-      time: adminArea.querySelector("#time").value || "19:00",
-      type: adminArea.querySelector("#type").value
+      title: root.querySelector("#title").value.trim() || "Weekly Match",
+      date: root.querySelector("#date").value,
+      time: root.querySelector("#time").value || "19:00",
+      type: root.querySelector("#type").value,
+      seasonId: MEM.selectedSeasonId
     };
 
     const out = await API.adminCreateMatch(MEM.adminKey, payload);
     setDisabled(btn, false);
 
-    const created = adminArea.querySelector("#created");
+    const created = root.querySelector("#created");
     if (!out.ok) {
       created.textContent = out.error || "Failed";
-      toastError(out.error || "Failed to create match");
-      return;
+      return toastError(out.error || "Failed to create match");
     }
 
     toastSuccess("Match created.");
-    const link = matchLink(out.publicCode);
 
-    created.innerHTML = `
-      Created ✅<br/>
-      <div class="small">Public match link:</div>
-      <div style="word-break:break-all">${link}</div>
-      <button class="btn primary" id="shareNew" style="margin-top:10px">Share to WhatsApp</button>
-    `;
+    // Requested: do NOT show URL here; just open the new match manage view
+    created.textContent = "Created ✅ Opening match…";
 
-    adminArea.querySelector("#shareNew").onclick = () => {
-      waOpenPrefill(`Manor Lakes FC match link:\n${link}`);
-      toastInfo("WhatsApp opened.");
+    // Collapse create match section
+    const details = root.querySelector("#createMatchCard");
+    if (details) details.open = false;
+
+    // Add new match into MEM + app storage immediately (NO API)
+    const newMatch = {
+      matchId: out.matchId,
+      publicCode: out.publicCode,
+      seasonId: out.seasonId || MEM.selectedSeasonId,
+      title: payload.title,
+      date: payload.date,
+      time: payload.time,
+      type: payload.type,
+      status: "OPEN",
+      ratingsLocked: "FALSE"
     };
 
-    // Explicit action => refresh cache from API
-    const res = await refreshMatchesFromApi();
-    if (!res.ok) toastError(res.error || "Refresh failed");
-    renderAdminArea(adminArea, "open", 1);
+    // Put new OPEN match at top
+    MEM.matches = [newMatch, ...(MEM.matches || []).filter(m => String(m.matchId) !== String(newMatch.matchId))];
+    lsSet(matchesKey(MEM.selectedSeasonId), { ts: now(), matches: MEM.matches });
+
+    // Clear any stale caches for this match code
+    clearPublicMatchDetailCache(out.publicCode);
+    clearManageCache(out.publicCode);
+
+    // Navigate to manage view (prev=open)
+    location.hash = `#/admin?view=manage&code=${encodeURIComponent(out.publicCode)}&prev=open`;
   };
 }
 
-function bindListButtons(adminArea) {
-  const query = new URLSearchParams(location.hash.split("?")[1] || "");
-  const { view, page } = getViewParams(query);
+function bindHeaderButtons(root, routeToken) {
+  root.querySelector("#logout").onclick = () => {
+    localStorage.removeItem(LS_ADMIN_KEY);
+    toastInfo("Logged out.");
+    renderLogin(root);
+  };
 
-  // pager
-  if (view === "past") {
-    const prev = adminArea.querySelector("#prevPage");
-    const next = adminArea.querySelector("#nextPage");
-    if (prev) prev.onclick = () => location.hash = `#/admin?view=past&page=${Math.max(1, page - 1)}`;
-    if (next) next.onclick = () => location.hash = `#/admin?view=past&page=${page + 1}`;
-  }
+  root.querySelector("#refresh").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
 
-  // manage
- adminArea.querySelectorAll("[data-manage]:not([disabled])").forEach(btn => {
-    btn.onclick = async () => {
-      const code = btn.getAttribute("data-manage");
-      const manageArea = adminArea.querySelector("#manageArea");
-      MEM.lastManagedCode = code;
+    const btn = root.querySelector("#refresh");
+    const msg = root.querySelector("#msg");
 
-      const orig = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "Opening…";
+    setDisabled(btn, true, "Refreshing…");
+    msg.textContent = "Refreshing…";
 
-      try {
-        const cached = getManageCache(code) || MEM.lastManageData;
-        if (cached) renderManageView(manageArea, cached);
-        else manageArea.innerHTML = `<div class="card"><div class="h1">Loading match…</div></div>`;
+    // Refresh seasons (auto-close updates)
+    lsDel(LS_SEASONS_CACHE);
+    const seasonsRes = await loadSeasonsCached(routeToken);
+    if (!stillOnAdmin(routeToken)) return;
 
-        const fresh = await API.getPublicMatch(code);
-        if (!fresh.ok) {
-          toastError(fresh.error || "Failed to load match");
-          if (!cached) manageArea.innerHTML = `<div class="card"><div class="h1">Error</div><div class="small">${fresh.error}</div></div>`;
-          return;
-        }
+    if (seasonsRes.ok) {
+      const picked = pickSelectedSeason(seasonsRes);
+      MEM.seasons = picked.seasons;
+      MEM.selectedSeasonId = localStorage.getItem(LS_SELECTED_SEASON) || picked.selected;
+      bindSeasonSelector(root, routeToken);
+      bindSeasonMgmt(root, routeToken);
+    }
 
-        setManageCache(code, fresh);
-        MEM.lastManageData = fresh;
-        MEM.lastManageTs = now();
-        renderManageView(manageArea, fresh);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = orig;
+    // Refresh matches for selected season (this is the only normal time we call adminListMatches)
+    const res = await refreshMatchesFromApi(MEM.selectedSeasonId, routeToken);
+
+    setDisabled(btn, false);
+    msg.textContent = "";
+
+    if (!res.ok) return toastError(res.error || "Refresh failed");
+    toastSuccess("Refreshed.");
+
+    const { view, code, prev } = getViewParams(currentHashQuery());
+    if (view === "manage" && code) {
+      // Refresh manage cache too
+      const fresh = await API.getPublicMatch(code);
+      if (stillOnAdmin(routeToken) && fresh.ok) {
+        lsSet(manageKey(code), { ts: now(), data: fresh });
+        renderManageUI(root, fresh, routeToken, { fromCache: false, prevView: prev });
       }
+    } else {
+      renderListView(root, view === "past" ? "past" : "open");
+    }
+  };
+}
+
+function bindListButtons(root, view) {
+  // Manage -> separate view; pass prev so Back is instant and consistent
+  root.querySelectorAll('[data-manage]:not([disabled])').forEach(btn => {
+    btn.onclick = () => {
+      const code = btn.getAttribute("data-manage");
+      location.hash = `#/admin?view=manage&code=${encodeURIComponent(code)}&prev=${encodeURIComponent(view)}`;
     };
   });
 
-  // close/lock/unlock
-  adminArea.querySelectorAll("[data-close]").forEach(btn => {
+  // Lock ratings
+  root.querySelectorAll('[data-lock]:not([disabled])').forEach(btn => {
     btn.onclick = async () => {
-      const matchId = btn.getAttribute("data-close");
-      setDisabled(btn, true, "Closing…");
-      const out = await API.adminCloseMatch(MEM.adminKey, matchId);
-      setDisabled(btn, false);
-      if (!out.ok) { toastError(out.error || "Failed"); return; }
-      toastSuccess("Availability closed.");
-      const res = await refreshMatchesFromApi();
-      if (!res.ok) toastError(res.error || "Refresh failed");
-      renderAdminArea(adminArea, view, page);
-    };
-  });
+      const routeToken = window.__mlfcAdminToken;
+      if (!stillOnAdmin(routeToken)) return;
 
-  adminArea.querySelectorAll("[data-lock]:not([disabled])").forEach(btn => {
-    btn.onclick = async () => {
       const matchId = btn.getAttribute("data-lock");
       setDisabled(btn, true, "Locking…");
+
       const out = await API.adminLockRatings(MEM.adminKey, matchId);
       setDisabled(btn, false);
-      if (!out.ok) { toastError(out.error || "Failed"); return; }
+
+      if (!out.ok) return toastError(out.error || "Failed");
       toastSuccess("Ratings locked.");
-      const res = await refreshMatchesFromApi();
-      if (!res.ok) toastError(res.error || "Refresh failed");
-      renderAdminArea(adminArea, view, page);
+
+      const found = (MEM.matches || []).find(x => String(x.matchId) === String(matchId));
+      if (found?.publicCode) {
+        clearPublicMatchDetailCache(found.publicCode);
+        clearManageCache(found.publicCode);
+      }
+
+      // Update list cache via API only if user wants latest; but here action definitely changed state
+      // so we update MEM locally (fast) and save.
+      MEM.matches = (MEM.matches || []).map(m => {
+        if (String(m.matchId) !== String(matchId)) return m;
+        return { ...m, status: "COMPLETED", ratingsLocked: "TRUE" };
+      });
+      lsSet(matchesKey(MEM.selectedSeasonId), { ts: now(), matches: MEM.matches });
+
+      // Re-render current list without API
+      renderListView(root, view);
     };
   });
 
-  adminArea.querySelectorAll("[data-unlock]").forEach(btn => {
+  // Unlock match
+  root.querySelectorAll('[data-unlock]').forEach(btn => {
     btn.onclick = async () => {
+      const routeToken = window.__mlfcAdminToken;
+      if (!stillOnAdmin(routeToken)) return;
+
       const matchId = btn.getAttribute("data-unlock");
       setDisabled(btn, true, "Unlocking…");
+
       const out = await API.adminUnlockMatch(MEM.adminKey, matchId);
       setDisabled(btn, false);
-      if (!out.ok) { toastError(out.error || "Failed"); return; }
+
+      if (!out.ok) return toastError(out.error || "Failed");
       toastSuccess("Match unlocked.");
-      const res = await refreshMatchesFromApi();
-      if (!res.ok) toastError(res.error || "Refresh failed");
-      renderAdminArea(adminArea, view, page);
+
+      const found = (MEM.matches || []).find(x => String(x.matchId) === String(matchId));
+      if (found?.publicCode) {
+        clearPublicMatchDetailCache(found.publicCode);
+        clearManageCache(found.publicCode);
+      }
+
+      // Update MEM locally immediately (no API)
+      MEM.matches = (MEM.matches || []).map(m => {
+        if (String(m.matchId) !== String(matchId)) return m;
+        return { ...m, status: "OPEN", ratingsLocked: "FALSE" };
+      });
+      lsSet(matchesKey(MEM.selectedSeasonId), { ts: now(), matches: MEM.matches });
+
+      // Re-render list without API
+      renderListView(root, view);
     };
   });
 }
 
-/* Minimal manage renderer: reuse your existing internal/opponent logic from earlier versions if desired.
-   For brevity, this one shows the same behavior you requested: captain links only after saving setup.
-*/
-function renderManageView(manageArea, data) {
+/* =======================
+   Manage UI (FULL)
+   - Opponent: set captain, show link only AFTER save + share button
+   - Internal: compact table (player + Blue/Orange), remove enables buttons again,
+              captains chosen via checkbox in team lists,
+              Save setup + Share teams buttons AFTER lists,
+              Captain links section only AFTER save
+   - No close availability anywhere
+   ======================= */
+
+function renderManageUI(root, data, routeToken, { fromCache, prevView } = { fromCache: true, prevView: "open" }) {
+  if (!stillOnAdmin(routeToken)) return;
+
+  const manageArea = root.querySelector("#manageArea");
+  const listArea = root.querySelector("#listArea");
+  listArea.style.display = "none";
+  manageArea.style.display = "block";
+
   const m = data.match;
   const status = String(m.status || "").toUpperCase();
   const locked = String(m.ratingsLocked || "").toUpperCase() === "TRUE";
-  const isEditLocked = locked || status === "CLOSED" || status === "COMPLETED";
-  const type = String(m.type || "").toUpperCase();
+  const isCompleted = status === "COMPLETED";
+  const isEditLocked = locked || status === "CLOSED" || isCompleted;
 
+  const type = String(m.type || "").toUpperCase();
   const availability = data.availability || [];
-  const yesPlayers = uniqueSorted(availability.filter(a => String(a.availability).toUpperCase() === "YES").map(a => a.playerName));
+  const yesPlayers = uniqueSorted(availability
+    .filter(a => String(a.availability).toUpperCase() === "YES")
+    .map(a => String(a.playerName || "").trim())
+  );
+
   const captains = data.captains || {};
   const teams = data.teams || [];
 
-  const header = `
+  const when = formatHumanDateTime(m.date, m.time);
+
+  manageArea.innerHTML = `
     <div class="card">
-      <div class="h1">Manage: ${m.title}</div>
-      <div class="row">
-        <span class="badge">${m.type}</span>
-        <span class="badge">${m.status}</span>
-        ${locked ? `<span class="badge badge--bad">LOCKED</span>` : `<span class="badge badge--good">EDITABLE</span>`}
+      <div class="row" style="justify-content:space-between; align-items:flex-start">
+        <div style="min-width:0">
+          <div class="h1" style="margin:0">Manage: ${m.title}</div>
+          <div class="small" style="margin-top:6px">${when} • ${m.type} • ${m.status}</div>
+          <div class="small" style="margin-top:6px">${fromCache ? "Loaded from device cache." : "Loaded from API."}</div>
+        </div>
+        <button class="btn gray" id="backToList">Back</button>
       </div>
+
       <div class="small" style="margin-top:10px">Match link:</div>
       <div class="small" style="word-break:break-all">${matchLink(m.publicCode)}</div>
 
-      <div class="row" style="margin-top:12px">
+      <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
         <button class="btn primary" id="shareMatch">Share match link</button>
         ${isEditLocked ? `<button class="btn gray" id="unlockBtn">Unlock match</button>` : ""}
+        <button class="btn primary" id="lockRatingsTop" ${locked ? "disabled" : ""}>Lock ratings</button>
       </div>
+
+      ${locked ? `<div class="small" style="margin-top:10px">This match is locked. Manage and Lock actions are disabled in lists.</div>` : ""}
     </div>
+
+    <div id="manageBody"></div>
   `;
 
+  manageArea.querySelector("#backToList").onclick = () => {
+    // Back to previous list view without API
+    location.hash = `#/admin?view=${encodeURIComponent(prevView || "open")}`;
+  };
+
+  manageArea.querySelector("#shareMatch").onclick = () => {
+    waOpenPrefill(`Manor Lakes FC match link:\n${matchLink(m.publicCode)}`);
+    toastInfo("WhatsApp opened.");
+  };
+
+  const unlockBtn = manageArea.querySelector("#unlockBtn");
+  if (unlockBtn) {
+    unlockBtn.onclick = async () => {
+      if (!stillOnAdmin(routeToken)) return;
+      setDisabled(unlockBtn, true, "Unlocking…");
+      const out = await API.adminUnlockMatch(MEM.adminKey, m.matchId);
+      setDisabled(unlockBtn, false);
+      if (!out.ok) return toastError(out.error || "Failed");
+
+      toastSuccess("Unlocked.");
+      clearPublicMatchDetailCache(m.publicCode);
+      clearManageCache(m.publicCode);
+
+      // Update MEM locally (no API)
+      MEM.matches = (MEM.matches || []).map(x => String(x.matchId) === String(m.matchId)
+        ? { ...x, status: "OPEN", ratingsLocked: "FALSE" }
+        : x
+      );
+      lsSet(matchesKey(MEM.selectedSeasonId), { ts: now(), matches: MEM.matches });
+
+      // Fetch fresh match once to update manage view (explicit action just happened)
+      const fresh = await API.getPublicMatch(m.publicCode);
+      if (stillOnAdmin(routeToken) && fresh.ok) {
+        lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
+        renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
+      }
+    };
+  }
+
+  manageArea.querySelector("#lockRatingsTop").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
+
+    const btn = manageArea.querySelector("#lockRatingsTop");
+    setDisabled(btn, true, "Locking…");
+
+    const out = await API.adminLockRatings(MEM.adminKey, m.matchId);
+    setDisabled(btn, false);
+    if (!out.ok) return toastError(out.error || "Failed");
+
+    toastSuccess("Ratings locked.");
+    clearPublicMatchDetailCache(m.publicCode);
+    clearManageCache(m.publicCode);
+
+    // Update MEM locally (no API)
+    MEM.matches = (MEM.matches || []).map(x => String(x.matchId) === String(m.matchId)
+      ? { ...x, status: "COMPLETED", ratingsLocked: "TRUE" }
+      : x
+    );
+    lsSet(matchesKey(MEM.selectedSeasonId), { ts: now(), matches: MEM.matches });
+
+    // Fetch fresh match once to update manage view
+    const fresh = await API.getPublicMatch(m.publicCode);
+    if (stillOnAdmin(routeToken) && fresh.ok) {
+      lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
+      renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
+    }
+  };
+
+  const manageBody = manageArea.querySelector("#manageBody");
+
+  /* ================= OPPONENT ================= */
   if (type === "OPPONENT") {
     const cap = String(captains.captain1 || "");
     const opts = yesPlayers.map(p => `<option value="${p}">${p}</option>`).join("");
     const capUrl = cap ? captainLink(m.publicCode, cap) : "";
 
-    manageArea.innerHTML = `
-      ${header}
-      <div class="card">
-        <div class="h1">Captain</div>
-        <select id="captainSel" class="input" ${isEditLocked ? "disabled" : ""}>
+    manageBody.innerHTML = `
+      <details class="card" open>
+        <summary style="font-weight:950">Captain setup</summary>
+
+        <div class="small" style="margin-top:8px">Select captain from available players. Link appears after save.</div>
+
+        <select id="captainSel" class="input" style="margin-top:10px" ${isEditLocked ? "disabled" : ""}>
           <option value="">Select captain</option>
           ${opts}
         </select>
+
         <div class="row" style="margin-top:10px">
           <button class="btn primary" id="saveCap" ${isEditLocked ? "disabled" : ""}>Save captain</button>
         </div>
 
         <div class="hr"></div>
+
         <div class="h1">Captain link</div>
         ${
           cap
@@ -533,93 +820,49 @@ function renderManageView(manageArea, data) {
             : `<div class="small">Save captain to generate link.</div>`
         }
 
-        <div class="row" style="margin-top:12px">
-          <button class="btn primary" id="lockRatings" ${locked ? "disabled" : ""}>Lock ratings</button>
-        </div>
         <div class="small" id="msg" style="margin-top:10px"></div>
-      </div>
+      </details>
     `;
 
-    manageArea.querySelector("#shareMatch").onclick = () => {
-      waOpenPrefill(`Manor Lakes FC match link:\n${matchLink(m.publicCode)}`);
-      toastInfo("WhatsApp opened.");
-    };
-
-    if (isEditLocked) {
-      manageArea.querySelector("#unlockBtn").onclick = async () => {
-        const btn = manageArea.querySelector("#unlockBtn");
-        setDisabled(btn, true, "Unlocking…");
-        const out = await API.adminUnlockMatch(MEM.adminKey, m.matchId);
-        setDisabled(btn, false);
-        if (!out.ok) { toastError(out.error || "Failed"); return; }
-        toastSuccess("Unlocked.");
-        const fresh = await API.getPublicMatch(m.publicCode);
-        if (fresh.ok) {
-          setManageCache(m.publicCode, fresh);
-          MEM.lastManageData = fresh;
-          renderManageView(manageArea, fresh);
-        }
-      };
-    }
-
-    const capSel = manageArea.querySelector("#captainSel");
+    const capSel = manageBody.querySelector("#captainSel");
     capSel.value = cap || "";
 
-    manageArea.querySelector("#saveCap").onclick = async () => {
-      const btn = manageArea.querySelector("#saveCap");
-      const msg = manageArea.querySelector("#msg");
+    manageBody.querySelector("#saveCap").onclick = async () => {
+      const btn = manageBody.querySelector("#saveCap");
+      const msg = manageBody.querySelector("#msg");
       const sel = capSel.value.trim();
-      if (!sel) { toastWarn("Select a captain"); return; }
+      if (!sel) return toastWarn("Select a captain");
 
       setDisabled(btn, true, "Saving…");
       msg.textContent = "Saving…";
       const out = await API.adminSetupOpponent(MEM.adminKey, { matchId: m.matchId, captain: sel });
       setDisabled(btn, false);
 
-      if (!out.ok) { msg.textContent = out.error || "Failed"; toastError(out.error || "Failed"); return; }
+      if (!out.ok) { msg.textContent = out.error || "Failed"; return toastError(out.error || "Failed"); }
       msg.textContent = "Saved ✅";
       toastSuccess("Captain saved.");
 
+      clearManageCache(m.publicCode);
+
       const fresh = await API.getPublicMatch(m.publicCode);
-      if (fresh.ok) {
-        setManageCache(m.publicCode, fresh);
-        MEM.lastManageData = fresh;
-        renderManageView(manageArea, fresh);
+      if (stillOnAdmin(routeToken) && fresh.ok) {
+        lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
+        renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
       }
     };
 
-    const shareBtn = manageArea.querySelector("#shareCap");
-    if (shareBtn) {
-      shareBtn.onclick = () => {
-        waOpenPrefill(`Captain link:\n${capUrl}`);
-        toastInfo("WhatsApp opened.");
-      };
-    }
-
-    manageArea.querySelector("#lockRatings").onclick = async () => {
-      const btn = manageArea.querySelector("#lockRatings");
-      setDisabled(btn, true, "Locking…");
-      const out = await API.adminLockRatings(MEM.adminKey, m.matchId);
-      setDisabled(btn, false);
-      if (!out.ok) { toastError(out.error || "Failed"); return; }
-      toastSuccess("Ratings locked.");
-      const res = await refreshMatchesFromApi();
-      if (!res.ok) toastError(res.error || "Refresh failed");
-
-      const fresh = await API.getPublicMatch(m.publicCode);
-      if (fresh.ok) {
-        setManageCache(m.publicCode, fresh);
-        MEM.lastManageData = fresh;
-        renderManageView(manageArea, fresh);
-      }
+    const shareBtn = manageBody.querySelector("#shareCap");
+    if (shareBtn) shareBtn.onclick = () => {
+      waOpenPrefill(`Captain link:\n${capUrl}`);
+      toastInfo("WhatsApp opened.");
     };
 
     return;
   }
 
-  // INTERNAL minimal: show save => then show captain links after save
-  let blue = uniqueSorted(teams.filter(t => t.team === "BLUE").map(t => t.playerName));
-  let orange = uniqueSorted(teams.filter(t => t.team === "ORANGE").map(t => t.playerName));
+  /* ================= INTERNAL ================= */
+  let blue = uniqueSorted(teams.filter(t => String(t.team).toUpperCase() === "BLUE").map(t => String(t.playerName || "").trim()));
+  let orange = uniqueSorted(teams.filter(t => String(t.team).toUpperCase() === "ORANGE").map(t => String(t.playerName || "").trim()));
   let captainBlue = String(captains.captain1 || "");
   let captainOrange = String(captains.captain2 || "");
 
@@ -627,81 +870,330 @@ function renderManageView(manageArea, data) {
   const blueUrl = hasSavedSetup ? captainLink(m.publicCode, captainBlue) : "";
   const orangeUrl = hasSavedSetup ? captainLink(m.publicCode, captainOrange) : "";
 
-  manageArea.innerHTML = `
-    ${header}
-    <div class="card">
-      <div class="h1">Internal setup</div>
-      <div class="small">Use your existing internal team UI here (table + lists).</div>
-      <div class="small">This admin.js stores caches in Application Storage now.</div>
+  function assignedTeam(p) {
+    if (blue.includes(p)) return "BLUE";
+    if (orange.includes(p)) return "ORANGE";
+    return "";
+  }
+
+  function setTeam(p, team) {
+    // remove from both
+    blue = blue.filter(x => x !== p);
+    orange = orange.filter(x => x !== p);
+
+    if (team === "BLUE") blue = uniqueSorted([...blue, p]);
+    if (team === "ORANGE") orange = uniqueSorted([...orange, p]);
+
+    // if captain got removed, clear
+    if (!blue.includes(captainBlue)) captainBlue = "";
+    if (!orange.includes(captainOrange)) captainOrange = "";
+  }
+
+  function removeFromTeam(p) {
+    blue = blue.filter(x => x !== p);
+    orange = orange.filter(x => x !== p);
+    if (captainBlue === p) captainBlue = "";
+    if (captainOrange === p) captainOrange = "";
+  }
+
+  manageBody.innerHTML = `
+    <details class="card" open>
+      <summary style="font-weight:950">Internal setup</summary>
+
+      <div class="small" style="margin-top:8px">
+        Assign available players to Blue/Orange. Remove re-enables selection buttons.
+      </div>
+
+      <div style="margin-top:12px; overflow:auto; border-radius:14px; border:1px solid rgba(11,18,32,0.10)">
+        <table style="width:100%; border-collapse:collapse; min-width:520px">
+          <thead>
+            <tr style="background: rgba(11,18,32,0.04)">
+              <th style="text-align:left; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Player</th>
+              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Blue</th>
+              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Orange</th>
+              <th style="text-align:center; padding:8px; font-size:12px; color:rgba(11,18,32,0.72)">Status</th>
+            </tr>
+          </thead>
+          <tbody id="teamTableBody"></tbody>
+        </table>
+      </div>
 
       <div class="hr"></div>
 
-      <div class="h1">Captain links</div>
+      <div class="row" style="gap:14px; align-items:flex-start">
+        <div style="flex:1; min-width:260px">
+          <div class="badge">BLUE</div>
+          <div id="blueList" style="margin-top:10px"></div>
+        </div>
+        <div style="flex:1; min-width:260px">
+          <div class="badge">ORANGE</div>
+          <div id="orangeList" style="margin-top:10px"></div>
+        </div>
+      </div>
+
+      <!-- Requested: Save + Share after lists -->
+      <div class="row" style="margin-top:14px; gap:10px; flex-wrap:wrap">
+        <button class="btn primary" id="saveSetup" ${isEditLocked ? "disabled" : ""}>Save setup</button>
+        <button class="btn primary" id="shareTeams" ${hasSavedSetup ? "" : "disabled"}>Share teams</button>
+      </div>
+
+      <div id="setupMsg" class="small" style="margin-top:10px"></div>
+    </details>
+
+    <details class="card" open>
+      <summary style="font-weight:950">Captain links</summary>
       ${
         hasSavedSetup
           ? `
-            <div class="row" style="justify-content:space-between; align-items:flex-start">
-              <div style="flex:1; min-width:0">
-                <div class="small"><b>Blue:</b> ${captainBlue}</div>
-                <div class="small" style="word-break:break-all">${blueUrl}</div>
-              </div>
-              <button class="btn primary" id="shareBlue">Share</button>
+          <div class="row" style="align-items:flex-start; justify-content:space-between; margin-top:10px">
+            <div style="flex:1; min-width:0">
+              <div class="small"><b>Blue captain:</b> ${captainBlue}</div>
+              <div class="small" style="word-break:break-all">${blueUrl}</div>
             </div>
-            <div class="hr"></div>
-            <div class="row" style="justify-content:space-between; align-items:flex-start">
-              <div style="flex:1; min-width:0">
-                <div class="small"><b>Orange:</b> ${captainOrange}</div>
-                <div class="small" style="word-break:break-all">${orangeUrl}</div>
-              </div>
-              <button class="btn primary" id="shareOrange">Share</button>
+            <button class="btn primary" id="shareBlueCap">Share</button>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="row" style="align-items:flex-start; justify-content:space-between">
+            <div style="flex:1; min-width:0">
+              <div class="small"><b>Orange captain:</b> ${captainOrange}</div>
+              <div class="small" style="word-break:break-all">${orangeUrl}</div>
             </div>
+            <button class="btn primary" id="shareOrangeCap">Share</button>
+          </div>
           `
-          : `<div class="small">Save setup to generate captain links.</div>`
+          : `<div class="small" style="margin-top:10px">Save setup to generate captain links.</div>`
       }
-    </div>
+    </details>
   `;
 
-  manageArea.querySelector("#shareMatch").onclick = () => {
-    waOpenPrefill(`Manor Lakes FC match link:\n${matchLink(m.publicCode)}`);
-    toastInfo("WhatsApp opened.");
-  };
+  function renderTeamTable() {
+    const tbody = manageBody.querySelector("#teamTableBody");
 
-  if (isEditLocked) {
-    manageArea.querySelector("#unlockBtn").onclick = async () => {
-      const btn = manageArea.querySelector("#unlockBtn");
-      setDisabled(btn, true, "Unlocking…");
-      const out = await API.adminUnlockMatch(MEM.adminKey, m.matchId);
-      setDisabled(btn, false);
-      if (!out.ok) { toastError(out.error || "Failed"); return; }
-      toastSuccess("Unlocked.");
-      const fresh = await API.getPublicMatch(m.publicCode);
-      if (fresh.ok) {
-        setManageCache(m.publicCode, fresh);
-        MEM.lastManageData = fresh;
-        renderManageView(manageArea, fresh);
-      }
-    };
+    tbody.innerHTML = yesPlayers.map(p => {
+      const a = assignedTeam(p);
+      const blueDisabled = (a === "ORANGE") || isEditLocked;
+      const orangeDisabled = (a === "BLUE") || isEditLocked;
+      const statusText = a || "Unassigned";
+
+      return `
+        <tr style="border-top:1px solid rgba(11,18,32,0.06)">
+          <td style="padding:8px; font-size:13px; font-weight:900; color: rgba(11,18,32,0.90)">${p}</td>
+          <td style="padding:8px; text-align:center">
+            <button class="btn good compactBtn" data-team-btn="BLUE" data-player="${encodeURIComponent(p)}" ${blueDisabled ? "disabled" : ""}>Blue</button>
+          </td>
+          <td style="padding:8px; text-align:center">
+            <button class="btn warn compactBtn" data-team-btn="ORANGE" data-player="${encodeURIComponent(p)}" ${orangeDisabled ? "disabled" : ""}>Orange</button>
+          </td>
+          <td style="padding:8px; text-align:center">
+            <span class="badge">${statusText}</span>
+          </td>
+        </tr>
+      `;
+    }).join("") || `<tr><td class="small" style="padding:10px" colspan="4">No available players yet.</td></tr>`;
+
+    tbody.querySelectorAll("[data-team-btn]").forEach(b => {
+      b.onclick = () => {
+        const team = b.getAttribute("data-team-btn");
+        const p = decodeURIComponent(b.getAttribute("data-player"));
+        setTeam(p, team);
+        renderAll();
+      };
+    });
   }
 
-  const shareBlue = manageArea.querySelector("#shareBlue");
-  if (shareBlue) shareBlue.onclick = () => { waOpenPrefill(`Blue captain link:\n${blueUrl}`); toastInfo("WhatsApp opened."); };
+  function renderLists() {
+    const blueEl = manageBody.querySelector("#blueList");
+    const orangeEl = manageBody.querySelector("#orangeList");
 
-  const shareOrange = manageArea.querySelector("#shareOrange");
-  if (shareOrange) shareOrange.onclick = () => { waOpenPrefill(`Orange captain link:\n${orangeUrl}`); toastInfo("WhatsApp opened."); };
+    function listHtml(players, teamName) {
+      if (!players.length) return `<div class="small">No players yet.</div>`;
+      return players.map(p => {
+        const isCap = (teamName === "BLUE" ? captainBlue === p : captainOrange === p);
+        const disabled = isEditLocked ? "disabled" : "";
+        return `
+          <div class="playerRow" style="display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px dashed rgba(11,18,32,0.10)">
+            <div class="small" style="font-weight:950; min-width:0">${p}</div>
+            <div class="row" style="gap:10px; align-items:center; justify-content:flex-end; flex-wrap:wrap">
+              <label class="small" style="display:flex; gap:6px; align-items:center">
+                <input type="checkbox" data-cap="${teamName}" data-player="${encodeURIComponent(p)}" ${isCap ? "checked" : ""} ${disabled}/>
+                Captain
+              </label>
+              <button class="btn gray" data-remove="${encodeURIComponent(p)}" style="padding:8px 10px; border-radius:12px" ${disabled}>Remove</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    blueEl.innerHTML = listHtml(blue, "BLUE");
+    orangeEl.innerHTML = listHtml(orange, "ORANGE");
+
+    manageBody.querySelectorAll("[data-cap]").forEach(cb => {
+      cb.onchange = () => {
+        const teamName = cb.getAttribute("data-cap");
+        const p = decodeURIComponent(cb.getAttribute("data-player"));
+        if (teamName === "BLUE") captainBlue = cb.checked ? p : "";
+        if (teamName === "ORANGE") captainOrange = cb.checked ? p : "";
+        renderAll();
+      };
+    });
+
+    manageBody.querySelectorAll("[data-remove]").forEach(btn => {
+      btn.onclick = () => {
+        const p = decodeURIComponent(btn.getAttribute("data-remove"));
+        removeFromTeam(p);
+        renderAll();
+      };
+    });
+  }
+
+  function renderAll() {
+    blue = uniqueSorted(blue);
+    orange = uniqueSorted(orange);
+    renderTeamTable();
+    renderLists();
+
+    const shareBtn = manageBody.querySelector("#shareTeams");
+    if (shareBtn) {
+      const ok = (blue.length + orange.length) > 0 && captainBlue && captainOrange;
+      shareBtn.disabled = !ok;
+    }
+  }
+
+  renderAll();
+
+  // Save setup
+  manageBody.querySelector("#saveSetup").onclick = async () => {
+    if (!stillOnAdmin(routeToken)) return;
+    if (isEditLocked) return toastWarn("Match is locked. Unlock to edit.");
+
+    const msg = manageBody.querySelector("#setupMsg");
+    if (!captainBlue || !captainOrange) {
+      msg.textContent = "Select captains for BOTH Blue and Orange.";
+      return toastWarn("Select both captains.");
+    }
+
+    const btn = manageBody.querySelector("#saveSetup");
+    setDisabled(btn, true, "Saving…");
+    msg.textContent = "Saving…";
+
+    const out = await API.adminSetupInternal(MEM.adminKey, {
+      matchId: m.matchId,
+      bluePlayers: blue,
+      orangePlayers: orange,
+      captainBlue,
+      captainOrange
+    });
+
+    setDisabled(btn, false);
+
+    if (!out.ok) {
+      msg.textContent = out.error || "Failed";
+      return toastError(out.error || "Failed to save setup");
+    }
+
+    msg.textContent = "Saved ✅";
+    toastSuccess("Setup saved.");
+
+    clearManageCache(m.publicCode);
+
+    const fresh = await API.getPublicMatch(m.publicCode);
+    if (stillOnAdmin(routeToken) && fresh.ok) {
+      lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
+      renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
+    }
+  };
+
+  // Share teams (after saved)
+  const shareTeamsBtn = manageBody.querySelector("#shareTeams");
+  shareTeamsBtn.onclick = () => {
+    const ok = (blue.length + orange.length) > 0 && captainBlue && captainOrange;
+    if (!ok) return toastWarn("Save setup first.");
+
+    setDisabled(shareTeamsBtn, true, "Opening…");
+
+    const lines = [];
+    lines.push(`Match: ${m.title}`);
+    lines.push(`When: ${when}`);
+    lines.push(`Type: INTERNAL`);
+    lines.push(`Link: ${matchLink(m.publicCode)}`);
+    lines.push("");
+    lines.push(`BLUE Captain: ${captainBlue}`);
+    blue.forEach((p, i) => lines.push(`${i + 1}. ${p}`));
+    lines.push("");
+    lines.push(`ORANGE Captain: ${captainOrange}`);
+    orange.forEach((p, i) => lines.push(`${i + 1}. ${p}`));
+    lines.push("");
+    lines.push(`Blue Captain Link: ${captainLink(m.publicCode, captainBlue)}`);
+    lines.push(`Orange Captain Link: ${captainLink(m.publicCode, captainOrange)}`);
+
+    waOpenPrefill(lines.join("\n"));
+    toastInfo("WhatsApp opened.");
+
+    setTimeout(() => setDisabled(shareTeamsBtn, false), 900);
+  };
+
+  // Captain link share buttons (only exist after save)
+  const sb = manageBody.querySelector("#shareBlueCap");
+  if (sb) sb.onclick = () => { waOpenPrefill(`Blue captain link:\n${captainLink(m.publicCode, captainBlue)}`); toastInfo("WhatsApp opened."); };
+  const so = manageBody.querySelector("#shareOrangeCap");
+  if (so) so.onclick = () => { waOpenPrefill(`Orange captain link:\n${captainLink(m.publicCode, captainOrange)}`); toastInfo("WhatsApp opened."); };
 }
 
-export async function renderAdminPage(root) {
+/* =======================
+   Main entry
+   ======================= */
+
+export async function renderAdminPage(root, query) {
   cleanupCaches();
 
-  const key = localStorage.getItem(LS_ADMIN_KEY);
-  if (!key) {
+  const routeToken = (window.__mlfcAdminToken = String(Math.random()));
+
+  const adminKey = localStorage.getItem(LS_ADMIN_KEY);
+  if (!adminKey) {
     renderLogin(root);
     return;
   }
-  MEM.adminKey = key;
+  MEM.adminKey = adminKey;
 
-  // Load cached matches from localStorage once; no API call unless Refresh/action
-  if (!MEM.matches.length) loadMatchesFromLocal();
+  // seasons cache-first
+  const seasonsRes = await loadSeasonsCached(routeToken);
+  if (!stillOnAdmin(routeToken)) return;
 
-  renderAdminShell(root);
+  if (!seasonsRes.ok) {
+    toastError(seasonsRes.error || "Failed to load seasons");
+    renderLogin(root);
+    return;
+  }
+
+  const picked = pickSelectedSeason(seasonsRes);
+  MEM.seasons = picked.seasons;
+  MEM.selectedSeasonId = localStorage.getItem(LS_SELECTED_SEASON) || picked.selected;
+
+  // matches cache-first (no API)
+  loadMatchesFromLocal(MEM.selectedSeasonId);
+
+  const { view, code, prev } = getViewParams(query);
+
+  renderAdminShell(root, view);
+
+  bindTopNav(root, routeToken);
+  bindSeasonSelector(root, routeToken);
+  bindSeasonMgmt(root, routeToken);
+  bindCreateMatch(root, routeToken);
+  bindHeaderButtons(root, routeToken);
+
+  const msg = root.querySelector("#msg");
+  msg.textContent = MEM.matches.length
+    ? "Loaded from device cache. Tap Refresh if you want the latest."
+    : "No cached matches for this season yet. Tap Refresh to load from server.";
+
+  // Render view without API
+  if (view === "manage" && code) {
+    await openManageView(root, code, routeToken, prev || "open");
+  } else {
+    renderListView(root, (view === "past") ? "past" : "open");
+  }
 }

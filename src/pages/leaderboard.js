@@ -1,140 +1,179 @@
+// src/pages/leaderboard.js
 import { API } from "../api/endpoints.js";
 import { toastError, toastSuccess, toastInfo } from "../ui/toast.js";
 import { cleanupCaches } from "../cache_cleanup.js";
+import { getRouteToken } from "../router.js";
 
-const LS_LEADERBOARD_KEY = "mlfc_leaderboard_cache_v1";
-// You said “manual refresh”; keep cache long.
-const LEADERBOARD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
+const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1";
+const LS_LB_PREFIX = "mlfc_leaderboard_v2:"; // + seasonId => {ts,data}
 
-function currentPath() {
-  return (location.hash || "#/match").split("?")[0];
+function now(){ return Date.now(); }
+function lsGet(k){ try{return JSON.parse(localStorage.getItem(k)||"null");}catch{return null;} }
+function lsSet(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch{} }
+
+function lbKey(seasonId){ return `${LS_LB_PREFIX}${seasonId}`; }
+
+function seasonSelectHtml(seasons, selectedId) {
+  const opts = (seasons||[]).map(s =>
+    `<option value="${s.seasonId}" ${s.seasonId===selectedId?"selected":""}>${s.name}</option>`
+  ).join("");
+  return `
+    <div class="row" style="gap:10px; align-items:center; margin-top:10px">
+      <div class="small" style="min-width:64px"><b>Season</b></div>
+      <select class="input" id="seasonSelect" style="flex:1">${opts}</select>
+    </div>
+  `;
 }
 
-function lsGet(key) {
-  try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; }
-}
-function lsSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
-function lsDel(key) {
-  try { localStorage.removeItem(key); } catch {}
-}
-function isFresh(entry, ttlMs) {
-  if (!entry?.ts) return false;
-  return (Date.now() - entry.ts) <= ttlMs;
+async function getSeasonsCached() {
+  const cached = lsGet(LS_SEASONS_CACHE);
+  if (cached?.data?.ok) return cached.data;
+  const res = await API.seasons();
+  if (res.ok) lsSet(LS_SEASONS_CACHE, { ts: now(), data: res });
+  return res;
 }
 
-function renderFromData(root, data, { cacheNote = "" } = {}) {
-  const topScorers = (data.topScorers || []).slice(0, 10);
-  const topAssists = (data.topAssists || []).slice(0, 10);
-  const bestPlayers = (data.bestPlayers || []).slice(0, 10); // show even if 1 rating
+function pickSelectedSeason(seasonsRes) {
+  const seasons = seasonsRes.seasons || [];
+  const current = seasonsRes.currentSeasonId || "";
+  let selected = localStorage.getItem(LS_SELECTED_SEASON) || "";
+  if (!seasons.some(s => s.seasonId === selected)) selected = current || seasons[0]?.seasonId || "";
+  if (selected) localStorage.setItem(LS_SELECTED_SEASON, selected);
+  return { seasons, selected };
+}
+
+function sortRows(rows, mode) {
+  const r = (rows||[]).slice();
+  if (mode === "goals") r.sort((a,b)=>(b.goals||0)-(a.goals||0));
+  else if (mode === "assists") r.sort((a,b)=>(b.assists||0)-(a.assists||0));
+  else r.sort((a,b)=>(b.avgRating||0)-(a.avgRating||0));
+  return r;
+}
+
+function renderTable(root, rows, sortMode) {
+  const body = root.querySelector("#lbBody");
+  const sorted = sortRows(rows, sortMode);
+
+  body.innerHTML = sorted.map((x, i) => `
+    <tr style="border-top:1px solid rgba(11,18,32,0.06)">
+      <td style="padding:10px; font-weight:950">${i+1}</td>
+      <td style="padding:10px; font-weight:950">${x.playerName}</td>
+      <td style="padding:10px; text-align:center">${x.goals || 0}</td>
+      <td style="padding:10px; text-align:center">${x.assists || 0}</td>
+      <td style="padding:10px; text-align:center">${(x.avgRating || 0).toFixed(2)}</td>
+      <td style="padding:10px; text-align:center" class="small">${x.matchesRated || 0}</td>
+    </tr>
+  `).join("") || `<tr><td colspan="6" class="small" style="padding:12px">No data.</td></tr>`;
+}
+
+export async function renderLeaderboardPage(root, query, tokenFromRouter) {
+  cleanupCaches();
+  const token = tokenFromRouter || getRouteToken();
+
+  let sortMode = "rating";
 
   root.innerHTML = `
     <div class="card">
-      <div class="h1">Leaderboards</div>
-      <div class="small">Cached on your device. Tap Refresh when you want.</div>
-      ${cacheNote ? `<div class="small" style="margin-top:6px">${cacheNote}</div>` : ""}
-      <div class="row" style="margin-top:10px">
+      <div class="h1">Leaderboard</div>
+      <div id="seasonBlock"></div>
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
         <button class="btn primary" id="refresh">Refresh</button>
         <button class="btn gray" id="clearCache">Clear cache</button>
       </div>
       <div class="small" id="msg" style="margin-top:8px"></div>
-    </div>
 
-    <div class="card">
-      <div class="h1">Top Scorers</div>
-      <ul class="list">
-        ${topScorers.map(x => `<li><b>${x.playerName}</b> — ${x.goals}</li>`).join("") || "<li class='small'>No data</li>"}
-      </ul>
-    </div>
-
-    <div class="card">
-      <div class="h1">Top Assists</div>
-      <ul class="list">
-        ${topAssists.map(x => `<li><b>${x.playerName}</b> — ${x.assists}</li>`).join("") || "<li class='small'>No data</li>"}
-      </ul>
-    </div>
-
-    <div class="card">
-      <div class="h1">Best Players (Avg Rating)</div>
-      <ul class="list" style="margin-top:8px">
-        ${
-          bestPlayers.length
-            ? bestPlayers.map(x =>
-                `<li><b>${x.playerName}</b> — ${Number(x.avgRating).toFixed(2)} <span class="small">(${x.matchesRated})</span></li>`
-              ).join("")
-            : "<li class='small'>No data</li>"
-        }
-      </ul>
-    </div>
-  `;
-
-  // Bind buttons
-  root.querySelector("#refresh").onclick = () => refreshLeaderboard(root);
-  root.querySelector("#clearCache").onclick = () => {
-    lsDel(LS_LEADERBOARD_KEY);
-    toastInfo("Leaderboard cache cleared.");
-    // Re-render minimal state
-    renderEmpty(root, "Cache cleared. Tap Refresh to load.");
-  };
-}
-
-function renderEmpty(root, note) {
-  root.innerHTML = `
-    <div class="card">
-      <div class="h1">Leaderboards</div>
-      <div class="small">${note || "No cached data. Tap Refresh to load."}</div>
-      <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="refresh">Refresh</button>
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+        <button class="btn gray" id="sortGoals">Sort Goals</button>
+        <button class="btn gray" id="sortAssists">Sort Assists</button>
+        <button class="btn gray" id="sortRating">Sort Rating</button>
       </div>
-      <div class="small" id="msg" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <div class="h1">Season Stats</div>
+      <div style="margin-top:10px; overflow:auto; border-radius:14px; border:1px solid rgba(11,18,32,0.10)">
+        <table style="width:100%; border-collapse:collapse; min-width:620px">
+          <thead>
+            <tr style="background: rgba(11,18,32,0.04)">
+              <th style="text-align:left; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">#</th>
+              <th style="text-align:left; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">Player</th>
+              <th style="text-align:center; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">Goals</th>
+              <th style="text-align:center; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">Assists</th>
+              <th style="text-align:center; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">Avg Rating</th>
+              <th style="text-align:center; padding:10px; font-size:12px; color:rgba(11,18,32,0.72)">Rated</th>
+            </tr>
+          </thead>
+          <tbody id="lbBody"></tbody>
+        </table>
+      </div>
     </div>
   `;
-  root.querySelector("#refresh").onclick = () => refreshLeaderboard(root);
-}
 
-async function refreshLeaderboard(root) {
-  const routeAtStart = currentPath();
-  const stillHere = () => currentPath() === routeAtStart;
+  const msg = root.querySelector("#msg");
 
-  const refreshBtn = root.querySelector("#refresh");
-  const msgEl = root.querySelector("#msg");
-
-  if (refreshBtn) refreshBtn.disabled = true;
-  if (msgEl) msgEl.textContent = "Loading…";
-
-  const res = await API.leaderboard();
-
-  if (!stillHere()) return;
-
-  if (refreshBtn) refreshBtn.disabled = false;
-
-  if (!res.ok) {
-    if (msgEl) msgEl.textContent = res.error || "Failed";
-    toastError(res.error || "Failed to load leaderboard");
-    return;
+  // seasons cache-first
+  const seasonsRes = await getSeasonsCached();
+  if (getRouteToken() !== token) return;
+  if (!seasonsRes.ok) {
+    msg.textContent = seasonsRes.error || "Failed seasons";
+    return toastError(seasonsRes.error || "Failed seasons");
   }
+  const { seasons, selected } = pickSelectedSeason(seasonsRes);
+  let seasonId = selected;
+  root.querySelector("#seasonBlock").innerHTML = seasonSelectHtml(seasons, seasonId);
 
-  lsSet(LS_LEADERBOARD_KEY, { ts: Date.now(), data: res });
-  toastSuccess("Leaderboards refreshed.");
-
-  renderFromData(root, res, { cacheNote: "" });
-}
-
-export async function renderLeaderboardPage(root) {
-  cleanupCaches(); // keep storage tidy
-
-  // No API call on tab open — cache-first
-  const cached = lsGet(LS_LEADERBOARD_KEY);
-
+  let rows = [];
+  const cached = lsGet(lbKey(seasonId));
   if (cached?.data?.ok) {
-    const note = isFresh(cached, LEADERBOARD_TTL_MS)
-      ? "Loaded from device cache."
-      : "Loaded cached data (may be old). Tap Refresh if needed.";
-
-    renderFromData(root, cached.data, { cacheNote: note });
-    return;
+    rows = cached.data.rows || [];
+    msg.textContent = "Loaded from device cache.";
+  } else {
+    msg.textContent = "No cached data. Tap Refresh.";
   }
+  renderTable(root, rows, sortMode);
 
-  renderEmpty(root, "No cached data yet. Tap Refresh to load.");
+  root.querySelector("#seasonSelect").onchange = () => {
+    seasonId = root.querySelector("#seasonSelect").value;
+    localStorage.setItem(LS_SELECTED_SEASON, seasonId);
+
+    const c = lsGet(lbKey(seasonId));
+    rows = c?.data?.ok ? (c.data.rows || []) : [];
+    msg.textContent = rows.length ? "Loaded from device cache." : "No cached data. Tap Refresh.";
+    renderTable(root, rows, sortMode);
+  };
+
+  root.querySelector("#sortGoals").onclick = () => { sortMode = "goals"; renderTable(root, rows, sortMode); };
+  root.querySelector("#sortAssists").onclick = () => { sortMode = "assists"; renderTable(root, rows, sortMode); };
+  root.querySelector("#sortRating").onclick = () => { sortMode = "rating"; renderTable(root, rows, sortMode); };
+
+  root.querySelector("#clearCache").onclick = () => {
+    localStorage.removeItem(lbKey(seasonId));
+    rows = [];
+    renderTable(root, rows, sortMode);
+    toastInfo("Leaderboard cache cleared.");
+    msg.textContent = "Cleared. Tap Refresh.";
+  };
+
+  root.querySelector("#refresh").onclick = async () => {
+    const btn = root.querySelector("#refresh");
+    btn.disabled = true; btn.textContent = "Refreshing…";
+    msg.textContent = "Loading…";
+
+    const res = await API.leaderboardSeason(seasonId);
+
+    btn.disabled = false; btn.textContent = "Refresh";
+    if (getRouteToken() !== token) return;
+
+    if (!res.ok) {
+      msg.textContent = res.error || "Failed";
+      return toastError(res.error || "Failed leaderboard");
+    }
+
+    lsSet(lbKey(seasonId), { ts: now(), data: res });
+    rows = res.rows || [];
+    renderTable(root, rows, sortMode);
+    msg.textContent = "";
+    toastSuccess("Leaderboard refreshed.");
+  };
 }

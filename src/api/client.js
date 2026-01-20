@@ -21,7 +21,6 @@ function loadingStart() {
   if (inflight === 1) {
     if (showTimer) clearTimeout(showTimer);
     showTimer = setTimeout(() => {
-      // still inflight?
       if (inflight > 0) setVisible(true);
     }, 300);
   }
@@ -35,7 +34,6 @@ function loadingEnd() {
       clearTimeout(showTimer);
       showTimer = null;
     }
-    // hide immediately
     setVisible(false);
   }
 }
@@ -45,7 +43,13 @@ export async function apiGet(params) {
   try {
     const url = new URL(CONFIG.API_BASE);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-    const res = await fetch(url.toString(), { method: "GET" });
+
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+    });
+
     return await res.json();
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
@@ -57,11 +61,22 @@ export async function apiGet(params) {
 export async function apiPost(body) {
   loadingStart();
   try {
+    // Use form-encoded to avoid CORS preflight with Apps Script
+    const params = new URLSearchParams();
+    Object.entries(body || {}).forEach(([k, v]) => {
+      // If object/array, stringify
+      if (typeof v === "object") params.set(k, JSON.stringify(v));
+      else params.set(k, String(v));
+    });
+
     const res = await fetch(CONFIG.API_BASE, {
       method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(body)
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: params.toString(),
     });
+
     return await res.json();
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
@@ -69,3 +84,4 @@ export async function apiPost(body) {
     loadingEnd();
   }
 }
+

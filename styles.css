@@ -597,5 +597,15 @@ a:hover { text-decoration: underline; }
 }
 
 
-.compactBtn { padding: 8px 8px !important; border-radius: 10px !important; width: 92px !important; font-size: 12px !important; }
+
 .compactName { font-size: 13px !important; font-weight: 900 !important; }
+.navWrap { position: sticky; top: 0; z-index: 50; background: rgba(255,255,255,0.92); backdrop-filter: blur(8px); border-bottom: 1px solid rgba(11,18,32,0.08); padding: 10px 12px; }
+.navBrand { font-weight: 950; font-size: 14px; color: rgba(11,18,32,0.90); margin-bottom: 8px; }
+.navTabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.tabBtn { padding: 10px 12px; border-radius: 14px; border: 1px solid rgba(11,18,32,0.12); background: white; font-weight: 900; }
+.tabBtn.active { border-color: rgba(16,185,129,0.5); }
+.navLoading { margin-top: 8px; font-size: 12px; color: rgba(11,18,32,0.7); }
+
+.page { padding: 12px; }
+
+.compactBtn { padding: 8px 8px !important; border-radius: 10px !important; width: 92px !important; font-size: 12px !important; }
