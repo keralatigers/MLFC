@@ -16,7 +16,13 @@ export const API = {
   getPublicMatch: (code) => apiGet({ action: "public_match", code }),
 setAvailability: (code, playerName, availability) =>
   apiPost({ action: "set_availability", code, playerName, availability }),
-
+registerPlayer(name, phone = "") {
+  return apiPost({
+    action: "register_player",
+    name,
+    phone
+  });
+},
   // admin
   adminListMatches: (adminKey, seasonId) => apiGet({ action: "admin_list_matches", adminKey, seasonId }),
   adminCreateMatch: (adminKey, payload) => apiPost({ action: "admin_create_match", adminKey, ...payload }),
