@@ -1,7 +1,7 @@
 {
   "name": "Manor Lakes Football Club",
   "short_name": "MLFC",
-  "start_url": "./#/match",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#070b14",
@@ -9,6 +9,7 @@
   "description": "Weekly match availability, teams, captains and ratings for Manor Lakes Football Club.",
   "icons": [
     { "src": "./assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "./assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "./assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "./assets/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

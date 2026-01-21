@@ -3,7 +3,7 @@
  * - Does NOT cache API responses (we cache API data in localStorage/sessionStorage in JS)
  */
 
-const CACHE_NAME = "mlfc-static-v1";
+const CACHE_NAME = "mlfc-static-v2";
 const STATIC_ASSETS = [
   "./",
   "./index.html",
@@ -20,8 +20,10 @@ const STATIC_ASSETS = [
   "./src/pages/leaderboard.js",
   "./src/pages/admin.js",
   "./src/pages/captain.js",
-//   "./assets/icons/icon-192.png",
-//   "./assets/icons/icon-512.png"
+  "./assets/icons/icon-192.png",
+  "./assets/icons/icon-512.png",
+  "./assets/icons/maskable-512.png"
+
 ];
 
 self.addEventListener("install", (event) => {

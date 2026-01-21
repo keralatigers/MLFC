@@ -4,6 +4,7 @@ import { toastError, toastSuccess, toastInfo } from "../ui/toast.js";
 import { cleanupCaches } from "../cache_cleanup.js";
 import { getRouteToken } from "../router.js";
 import { lsGet, lsSet, lsDel } from "../storage.js";
+import { isReloadFor } from "../nav_state.js";
 
 const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
 const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1";
@@ -78,7 +79,6 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
       <div id="seasonBlock"></div>
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
         <button class="btn primary" id="refresh">Refresh</button>
-        <button class="btn gray" id="clearCache">Clear cache</button>
       </div>
       <div class="small" id="msg" style="margin-top:8px"></div>
 
@@ -128,7 +128,7 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
     rows = cached.data.rows || [];
     msg.textContent = "Loaded from device cache.";
   } else {
-    msg.textContent = "No cached data. Tap Refresh.";
+    msg.textContent = "No cached data. Tap Refresh (or refresh your browser).";
   }
   renderTable(root, rows, sortMode);
 
@@ -138,7 +138,7 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
 
     const c = lsGet(lbKey(seasonId));
     rows = c?.data?.ok ? (c.data.rows || []) : [];
-    msg.textContent = rows.length ? "Loaded from device cache." : "No cached data. Tap Refresh.";
+    msg.textContent = rows.length ? "Loaded from device cache." : "No cached data. Tap Refresh (or refresh your browser).";
     renderTable(root, rows, sortMode);
   };
 
@@ -146,18 +146,13 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
   root.querySelector("#sortAssists").onclick = () => { sortMode = "assists"; renderTable(root, rows, sortMode); };
   root.querySelector("#sortRating").onclick = () => { sortMode = "rating"; renderTable(root, rows, sortMode); };
 
-  root.querySelector("#clearCache").onclick = () => {
-    lsDel(lbKey(seasonId));
-    rows = [];
-    renderTable(root, rows, sortMode);
-    toastInfo("Leaderboard cache cleared.");
-    msg.textContent = "Cleared. Tap Refresh.";
-  };
-
-  root.querySelector("#refresh").onclick = async () => {
+  async function refreshLeaderboard() {
     const btn = root.querySelector("#refresh");
     btn.disabled = true; btn.textContent = "Refreshing…";
     msg.textContent = "Loading…";
+
+    // Refresh should clear cache and then fetch fresh.
+    lsDel(lbKey(seasonId));
 
     const res = await API.leaderboardSeason(seasonId);
 
@@ -174,5 +169,13 @@ export async function renderLeaderboardPage(root, query, tokenFromRouter) {
     renderTable(root, rows, sortMode);
     msg.textContent = "";
     toastSuccess("Leaderboard refreshed.");
-  };
+  }
+
+  root.querySelector("#refresh").onclick = refreshLeaderboard;
+
+  // Auto-refresh only on browser reload (or first load with empty cache)
+  if (isReloadFor("#/leaderboard") || !cached?.data?.ok) {
+    // Run without blocking initial render
+    refreshLeaderboard().catch(() => {});
+  }
 }

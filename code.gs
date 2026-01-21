@@ -36,6 +36,28 @@ const TTL_PUBLIC_MATCH = 15;
 const TTL_LEADERBOARD = 30;
 const TTL_PLAYERS = 6 * 60 * 60;
 const TZ = "Australia/Melbourne";
+
+// =========================
+// Script-level caching helpers (CacheService + versioned keys)
+// =========================
+
+// Cache headers maps aggressively (header row almost never changes)
+const TTL_HEADERS = 6 * 60 * 60; // 6h
+
+function props() { return PropertiesService.getScriptProperties(); }
+function tokenKey(name) { return `tok:${name}`; }
+function getToken(name) {
+  const v = props().getProperty(tokenKey(name));
+  return v ? String(v) : "1";
+}
+function bumpToken(name) {
+  const p = props();
+  const k = tokenKey(name);
+  const cur = Number(p.getProperty(k) || "1");
+  const next = String((Number.isFinite(cur) ? cur : 1) + 1);
+  p.setProperty(k, next);
+  return next;
+}
 function jsonOut(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
@@ -126,14 +148,23 @@ function getHeaders(sh) {
 }
 
 function headerMap(sh) {
+  // Hot-path optimization: cache header maps in CacheService.
+  // Header row changes are very rare; if it ever changes, wait TTL_HEADERS or bump tok:headers manually.
+  const sheetName = sh.getName();
+  const tok = getToken(`headers:${sheetName}`);
+  const key = `hdr:v1:${sheetName}:${tok}`;
+  const cached = cacheGetJson(key);
+  if (cached) return cached;
+
   const headers = getHeaders(sh);
   const h = {};
   headers.forEach((k, i) => {
-    const key = String(k);
-    h[key] = i;
-    const low = key.toLowerCase();
+    const sk = String(k);
+    h[sk] = i;
+    const low = sk.toLowerCase();
     if (h[low] == null) h[low] = i;
   });
+  cachePutJson(key, h, TTL_HEADERS);
   return h;
 }
 
@@ -162,11 +193,17 @@ function parseMatchDateTime(match) {
    Seasons
    ========================= */
 
-function seasonsCacheKey() { return "seasons:v2"; }
-function currentSeasonCacheKey() { return "currentSeason:v2"; }
+function seasonsCacheKey() {
+  const tok = getToken("seasons");
+  return `seasons:v2:${tok}`;
+}
+function currentSeasonCacheKey() {
+  const tok = getToken("seasons");
+  return `currentSeason:v2:${tok}`;
+}
 
 function invalidateSeasons() {
-  cacheRemove([seasonsCacheKey(), currentSeasonCacheKey()]);
+  bumpToken("seasons");
 }
 
 function getSeasons() {
@@ -245,8 +282,13 @@ function getCurrentSeasonId() {
    Players (cached)
    ========================= */
 
-function playersCacheKey() { return "players:v2"; }
-function invalidatePlayers() { cacheRemove([playersCacheKey()]); }
+function playersCacheKey() {
+  const tok = getToken("players");
+  return `players:v2:${tok}`;
+}
+function invalidatePlayers() {
+  bumpToken("players");
+}
 
 function getPlayersCached() {
   const cached = cacheGetJson(playersCacheKey());
@@ -270,18 +312,16 @@ function getPlayersCached() {
    Match Index (cached)
    ========================= */
 
-function matchIndexKey() { return "matchIndex:v6"; }
+function matchIndexKey() {
+  const tok = getToken("matchesIndex");
+  return `matchIndex:v6:${tok}`;
+}
 
 function invalidateMatches(seasonIdOpt, publicCodeOpt) {
-  const keys = [matchIndexKey()];
-  if (seasonIdOpt) {
-    keys.push(`public_open:v2:${seasonIdOpt}`);
-    keys.push(`public_past:v2:${seasonIdOpt}:p1:s20`);
-    keys.push(`public_meta:v2:${seasonIdOpt}`);
-    keys.push(`lb:v3:${seasonIdOpt}`);
-  }
-  if (publicCodeOpt) keys.push(`public_match:v6:${publicCodeOpt}`);
-  cacheRemove(keys);
+  // Versioned tokens let us cache more aggressively without needing to enumerate/remove all keys.
+  bumpToken("matchesIndex");
+  if (seasonIdOpt) bumpToken(`season:${seasonIdOpt}`);
+  if (publicCodeOpt) bumpToken(`match:${publicCodeOpt}`);
 }
 
 function getMatchIndex() {
@@ -384,11 +424,21 @@ function readRowsByMatchId(sheetName, matchId) {
     });
 }
 
+// Cached variant used for assembling public_match responses.
+// cacheScope should include any version token (e.g. match token) to avoid stale rows.
+function readRowsByMatchIdCached(sheetName, matchId, cacheScope, ttlSec) {
+  const key = `rows:v1:${sheetName}:${matchId}:${cacheScope}`;
+  const cached = cacheGetJson(key);
+  if (cached) return cached;
+  const rows = readRowsByMatchId(sheetName, matchId);
+  cachePutJson(key, rows, ttlSec);
+  return rows;
+}
+
 function getCaptainsRow(matchId) {
   const sh = getSheet(SHEET_CAPTAINS);
   const headers = getHeaders(sh);
-  const h = {};
-  headers.forEach((k, i) => h[String(k)] = i);
+  const h = headerMap(sh);
 
   const rows = readAllDataRows(sh);
   const idxMid = h.matchId;
@@ -402,6 +452,15 @@ function getCaptainsRow(matchId) {
     }
   }
   return null;
+}
+
+function getCaptainsRowCached(matchId, cacheScope, ttlSec) {
+  const key = `captains:v1:${matchId}:${cacheScope}`;
+  const cached = cacheGetJson(key);
+  if (cached) return cached;
+  const row = getCaptainsRow(matchId);
+  cachePutJson(key, row, ttlSec);
+  return row;
 }
 
 function ensureCaptainAllowed(matchId, givenBy) {
@@ -439,7 +498,10 @@ function isRatingsLocked(matchId) {
    Leaderboard per season
    ========================= */
 
-function leaderboardKey(seasonId) { return `lb:v3:${seasonId}`; }
+function leaderboardKey(seasonId) {
+  const tok = getToken(`season:${seasonId}`);
+  return `lb:v3:${seasonId}:${tok}`;
+}
 
 function getSeasonMatchIds(seasonId) {
   const idx = getMatchIndex();
@@ -538,7 +600,8 @@ function doGet(e) {
 
     if (action === "public_matches_meta") {
       const seasonId = String(e.parameter.seasonId || getCurrentSeasonId());
-      const key = `public_meta:v2:${seasonId}`;
+      const tok = getToken(`season:${seasonId}`);
+      const key = `public_meta:v2:${seasonId}:${tok}`;
       const cached = cacheGetJson(key);
       if (cached) return jsonOut(cached);
 
@@ -571,7 +634,8 @@ const open = list
     // Open matches only (fast, no paging needed usually)
     if (action === "public_open_matches") {
       const seasonId = String(e.parameter.seasonId || getCurrentSeasonId());
-      const key = `public_open:v2:${seasonId}`;
+      const tok = getToken(`season:${seasonId}`);
+      const key = `public_open:v2:${seasonId}:${tok}`;
       const cached = cacheGetJson(key);
       if (cached) return jsonOut(cached);
 
@@ -594,7 +658,8 @@ const open = list
       const seasonId = String(e.parameter.seasonId || getCurrentSeasonId());
       const pageSize = Math.max(5, Math.min(50, Number(e.parameter.pageSize || 20)));
       const page = Math.max(1, Number(e.parameter.page || 1));
-      const key = `public_past:v2:${seasonId}:p${page}:s${pageSize}`;
+      const tok = getToken(`season:${seasonId}`);
+      const key = `public_past:v2:${seasonId}:${tok}:p${page}:s${pageSize}`;
       const cached = cacheGetJson(key);
       if (cached) return jsonOut(cached);
 
@@ -628,7 +693,8 @@ const open = list
       const code = String(e.parameter.code || "");
       if (!code) return jsonOut({ ok: false, error: "code required" });
 
-      const key = `public_match:v6:${code}`;
+      const tok = getToken(`match:${code}`);
+      const key = `public_match:v6:${code}:${tok}`;
       const cached = cacheGetJson(key);
       if (cached) return jsonOut(cached);
 
@@ -637,12 +703,17 @@ const open = list
 
       match = ensureAutoClose(match);
 
-      const availability = readRowsByMatchId(SHEET_AVAIL, match.matchId);
-      const captains = getCaptainsRow(match.matchId);
-      const teams = readRowsByMatchId(SHEET_TEAMS, match.matchId);
-      const ratings = readRowsByMatchId(SHEET_RATINGS, match.matchId);
-      const scores = readRowsByMatchId(SHEET_SCORES, match.matchId);
-      const events = sheetExists(SHEET_EVENTS) ? readRowsByMatchId(SHEET_EVENTS, match.matchId) : [];
+      // Cached sub-reads to reduce repeated sheet scans on hot endpoints.
+      // cacheScope must include match token so invalidation is automatic.
+      const subScope = `${tok}`;
+      const availability = readRowsByMatchIdCached(SHEET_AVAIL, match.matchId, subScope, TTL_PUBLIC_MATCH);
+      const captains = getCaptainsRowCached(match.matchId, subScope, TTL_PUBLIC_MATCH);
+      const teams = readRowsByMatchIdCached(SHEET_TEAMS, match.matchId, subScope, TTL_PUBLIC_MATCH);
+      const ratings = readRowsByMatchIdCached(SHEET_RATINGS, match.matchId, subScope, TTL_PUBLIC_MATCH);
+      const scores = readRowsByMatchIdCached(SHEET_SCORES, match.matchId, subScope, TTL_PUBLIC_MATCH);
+      const events = sheetExists(SHEET_EVENTS)
+        ? readRowsByMatchIdCached(SHEET_EVENTS, match.matchId, subScope, TTL_PUBLIC_MATCH)
+        : [];
 
       const out = { ok: true, match, availability, captains, teams, ratings, scores, events };
       cachePutJson(key, out, TTL_PUBLIC_MATCH);
@@ -658,13 +729,21 @@ const open = list
       requireAdminKey(e.parameter.adminKey);
       const seasonId = String(e.parameter.seasonId || getCurrentSeasonId());
 
+      // Cached because admins often click around; matches index + sheet reads can be slow.
+      const tok = getToken(`season:${seasonId}`);
+      const key = `admin_list:v2:${seasonId}:${tok}`;
+      const cached = cacheGetJson(key);
+      if (cached) return jsonOut(cached);
+
       const idx = getMatchIndex();
       const matches = (idx.list || [])
         .filter(m => matchBelongsToSeason(m, seasonId))
         .map(m => ensureAutoClose(m))
         .sort((a, b) => parseMatchDateTime(b) - parseMatchDateTime(a));
 
-      return jsonOut({ ok: true, seasonId, matches });
+      const out = { ok: true, seasonId, matches };
+      cachePutJson(key, out, 15);
+      return jsonOut(out);
     }
 
     return jsonOut({ ok: false, error: "Unknown action" });
@@ -824,6 +903,10 @@ if (action === "register_player") {
       const matchId = String(body.matchId || "");
       if (!matchId) return jsonOut({ ok: false, error: "matchId required" });
 
+      // Resolve season/code for targeted cache invalidation
+      const idx = getMatchIndex();
+      const m = (idx.list || []).find(x => String(x.matchId) === String(matchId)) || null;
+
       // Unlock and keep OPEN even if start time passed => disable auto close
       setMatchFields(matchId, {
         ratingsLocked: "FALSE",
@@ -831,7 +914,7 @@ if (action === "register_player") {
         autoCloseEnabled: "FALSE"
       });
 
-      invalidateMatches();
+      invalidateMatches(m?.seasonId, m?.publicCode);
       return jsonOut({ ok: true });
     }
 
@@ -840,8 +923,11 @@ if (action === "register_player") {
       const matchId = String(body.matchId || "");
       if (!matchId) return jsonOut({ ok: false, error: "matchId required" });
 
+      const idx = getMatchIndex();
+      const m = (idx.list || []).find(x => String(x.matchId) === String(matchId)) || null;
+
       setMatchFields(matchId, { ratingsLocked: "TRUE", status: "COMPLETED" });
-      invalidateMatches();
+      invalidateMatches(m?.seasonId, m?.publicCode);
       return jsonOut({ ok: true });
     }
 
@@ -853,6 +939,9 @@ if (action === "register_player") {
 
       ensureMatchEditableForAdmin(matchId);
 
+      const idx = getMatchIndex();
+      const m = (idx.list || []).find(x => String(x.matchId) === String(matchId)) || null;
+
       const sh = getSheet(SHEET_CAPTAINS);
       const h = headerMap(sh);
       const rows = readAllDataRows(sh);
@@ -863,7 +952,7 @@ if (action === "register_player") {
           sh.getRange(i + 2, h.captain2 + 1).setValue("");
           if (h.captain1Team != null) sh.getRange(i + 2, h.captain1Team + 1).setValue("MLFC");
           if (h.captain2Team != null) sh.getRange(i + 2, h.captain2Team + 1).setValue("");
-          invalidateMatches();
+          invalidateMatches(m?.seasonId, m?.publicCode);
           return jsonOut({ ok: true });
         }
       }
@@ -883,6 +972,9 @@ if (action === "register_player") {
       if (!captainBlue || !captainOrange) return jsonOut({ ok: false, error: "captainBlue/captainOrange required" });
 
       ensureMatchEditableForAdmin(matchId);
+
+      const idx = getMatchIndex();
+      const m = (idx.list || []).find(x => String(x.matchId) === String(matchId)) || null;
 
       // overwrite TEAMS rows for matchId
       const teamSh = getSheet(SHEET_TEAMS);
@@ -907,7 +999,7 @@ if (action === "register_player") {
           capSh.getRange(i + 2, ch.captain2 + 1).setValue(captainOrange);
           if (ch.captain1Team != null) capSh.getRange(i + 2, ch.captain1Team + 1).setValue("BLUE");
           if (ch.captain2Team != null) capSh.getRange(i + 2, ch.captain2Team + 1).setValue("ORANGE");
-          invalidateMatches();
+          invalidateMatches(m?.seasonId, m?.publicCode);
           return jsonOut({ ok: true });
         }
       }

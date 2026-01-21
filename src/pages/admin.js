@@ -2,6 +2,7 @@
 import { API } from "../api/endpoints.js";
 import { toastSuccess, toastError, toastInfo, toastWarn } from "../ui/toast.js";
 import { cleanupCaches } from "../cache_cleanup.js";
+import { isReloadForAdminList, isReloadForAdminMatchCode } from "../nav_state.js";
 
 const LS_ADMIN_KEY = "mlfc_adminKey";
 const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
@@ -279,7 +280,6 @@ function renderAdminShell(root, view) {
       <div id="seasonBlock"></div>
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
-        <button id="refresh" class="btn primary">Refresh</button>
         <button id="logout" class="btn gray">Logout</button>
       </div>
 
@@ -349,9 +349,10 @@ function renderListView(root, view) {
   // When list view is visible, show admin chrome
   setAdminChromeVisible(root, true);
 
-  // Show list, hide manage (do not destroy DOM)
+  // Show list, hide manage (destroy manage DOM so Back returns to a clean full view)
   listArea.style.display = "block";
   manageArea.style.display = "none";
+  manageArea.innerHTML = "";
 
   const open = (MEM.matches || []).filter(m => String(m.status || "").toUpperCase() === "OPEN");
   const past = (MEM.matches || []).filter(m => String(m.status || "").toUpperCase() !== "OPEN");
@@ -387,7 +388,20 @@ async function openManageView(root, code, routeToken, prevView) {
   const cached = lsGet(manageKey(code));
   if (cached?.data?.ok) {
     renderManageUI(root, cached.data, routeToken, { fromCache: true, prevView });
-    return; // no auto fetch
+
+    // Per requirement: reload match details from API only on a browser refresh.
+    if (isReloadForAdminMatchCode(code)) {
+      API.getPublicMatch(code)
+        .then(fresh => {
+          if (!stillOnAdmin(routeToken)) return;
+          if (!fresh?.ok) return;
+          lsSet(manageKey(code), { ts: now(), data: fresh });
+          renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
+        })
+        .catch(() => {});
+    }
+
+    return;
   }
 
   // No cache: show loading, then fetch ONCE
@@ -548,50 +562,6 @@ function bindHeaderButtons(root, routeToken) {
     toastInfo("Logged out.");
     renderLogin(root);
   };
-
-  root.querySelector("#refresh").onclick = async () => {
-    if (!stillOnAdmin(routeToken)) return;
-
-    const btn = root.querySelector("#refresh");
-    const msg = root.querySelector("#msg");
-
-    setDisabled(btn, true, "Refreshing…");
-    msg.textContent = "Refreshing…";
-
-    // Refresh seasons (auto-close updates)
-    lsDel(LS_SEASONS_CACHE);
-    const seasonsRes = await loadSeasonsCached(routeToken);
-    if (!stillOnAdmin(routeToken)) return;
-
-    if (seasonsRes.ok) {
-      const picked = pickSelectedSeason(seasonsRes);
-      MEM.seasons = picked.seasons;
-      MEM.selectedSeasonId = localStorage.getItem(LS_SELECTED_SEASON) || picked.selected;
-      bindSeasonSelector(root, routeToken);
-      bindSeasonMgmt(root, routeToken);
-    }
-
-    // Refresh matches for selected season (this is the only normal time we call adminListMatches)
-    const res = await refreshMatchesFromApi(MEM.selectedSeasonId, routeToken);
-
-    setDisabled(btn, false);
-    msg.textContent = "";
-
-    if (!res.ok) return toastError(res.error || "Refresh failed");
-    toastSuccess("Refreshed.");
-
-    const { view, code, prev } = getViewParams(currentHashQuery());
-    if (view === "manage" && code) {
-      // Refresh manage cache too
-      const fresh = await API.getPublicMatch(code);
-      if (stillOnAdmin(routeToken) && fresh.ok) {
-        lsSet(manageKey(code), { ts: now(), data: fresh });
-        renderManageUI(root, fresh, routeToken, { fromCache: false, prevView: prev });
-      }
-    } else {
-      renderListView(root, view === "past" ? "past" : "open");
-    }
-  };
 }
 
 function bindListButtons(root, view) {
@@ -605,10 +575,9 @@ function bindListButtons(root, view) {
       if (!stillOnAdmin(routeToken)) return;
 
       const code = btn.getAttribute("data-manage");
-      await openManageView(root, code, routeToken, view);
-
-      // Update URL for shareability, but avoid depending on router.
-      history.replaceState(null, "", `${baseUrl()}#/admin?view=manage&code=${encodeURIComponent(code)}&prev=${encodeURIComponent(view)}`);
+      // Navigate using the hash so the browser back button returns to the admin list view
+      // (instead of whatever tab was open before entering admin).
+      location.hash = `#/admin?view=manage&code=${encodeURIComponent(code)}&prev=${encodeURIComponent(view)}`;
     };
   });
 
@@ -723,10 +692,7 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
           <div class="h1" style="margin:0">Manage: ${m.title}</div>
           <div class="small" style="margin-top:6px">${when} • ${m.type} • ${m.status}</div>
           <div class="small" style="margin-top:6px">${fromCache ? "Loaded from device cache." : "Loaded from API."}</div>
-        </div>
-        <div class="row" style="gap:10px">
-          <button class="btn gray" id="refreshMatch">Refresh</button>
-          <button class="btn gray" id="backToList">Back</button>
+          <div class="small" style="margin-top:6px">Refresh your browser to reload latest match details.</div>
         </div>
       </div>
 
@@ -745,37 +711,8 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
     <div id="manageBody"></div>
   `;
 
-  manageArea.querySelector("#backToList").onclick = () => {
-    // Show full admin page chrome and return to list view WITHOUT reloading the route.
-    const view = (prevView || "open").toLowerCase();
-    setAdminChromeVisible(root, true);
-    renderListView(root, view === "past" ? "past" : "open");
-
-    // Keep URL in sync but avoid triggering router work.
-    const base = location.href.split("#")[0];
-    history.replaceState(null, "", `${base}#/admin?view=${encodeURIComponent(view)}`);
-  };
-
-  // Refresh match data so availability changes are reflected (e.g., after players submit).
-  manageArea.querySelector("#refreshMatch").onclick = async () => {
-    if (!stillOnAdmin(routeToken)) return;
-
-    const btn = manageArea.querySelector("#refreshMatch");
-    setDisabled(btn, true, "Refreshing…");
-
-    // Bust caches so we don't re-render stale data
-    clearPublicMatchDetailCache(m.publicCode);
-    clearManageCache(m.publicCode);
-
-    const fresh = await API.getPublicMatch(m.publicCode);
-    setDisabled(btn, false);
-    if (!stillOnAdmin(routeToken)) return;
-    if (!fresh.ok) return toastError(fresh.error || "Failed to refresh match");
-
-    lsSet(manageKey(m.publicCode), { ts: now(), data: fresh });
-    toastSuccess("Match refreshed.");
-    renderManageUI(root, fresh, routeToken, { fromCache: false, prevView });
-  };
+  // Per requirement: no in-page Back/Refresh buttons.
+  // Use browser back/forward and browser refresh when needed.
 
   manageArea.querySelector("#shareMatch").onclick = () => {
     waOpenPrefill(`Manor Lakes FC match link:\n${matchLink(m.publicCode)}`);
@@ -1277,8 +1214,21 @@ export async function renderAdminPage(root, query) {
 
   const msg = root.querySelector("#msg");
   msg.textContent = MEM.matches.length
-    ? "Loaded from device cache. Tap Refresh if you want the latest."
-    : "No cached matches for this season yet. Tap Refresh to load from server.";
+    ? "Loaded from device cache. Refresh your browser to fetch the latest."
+    : "No cached matches for this season yet. Refresh your browser to load from server.";
+
+  // Per requirement: fetch admin matches from API ONLY on browser refresh (or first time with empty cache).
+  const shouldReloadFetch = isReloadForAdminList() || !MEM.matches.length;
+  if (shouldReloadFetch) {
+    msg.textContent = "Loading latest…";
+    const out = await refreshMatchesFromApi(MEM.selectedSeasonId, routeToken);
+    if (!stillOnAdmin(routeToken)) return;
+    if (!out.ok) {
+      msg.textContent = out.error || "Failed to load";
+    } else {
+      msg.textContent = "";
+    }
+  }
 
   // Render view without API
   if (view === "manage" && code) {

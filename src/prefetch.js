@@ -9,6 +9,7 @@
 
 import { API } from "./api/endpoints.js";
 import { lsGet, lsSet } from "./storage.js";
+import { isBrowserReload } from "./nav_state.js";
 
 const LS_SEASONS_CACHE = "mlfc_seasons_cache_v1"; // {ts,data}
 const LS_SELECTED_SEASON = "mlfc_selected_season_v1";
@@ -42,21 +43,8 @@ function pastKey(seasonId) { return `${LS_PAST_CACHE_PREFIX}${seasonId}`; }
 function metaKey(seasonId) { return `${LS_MATCH_META_PREFIX}${seasonId}`; }
 function lbKey(seasonId) { return `${LS_LB_PREFIX}${seasonId}`; }
 
-async function getSeasonsCachedOrFetch() {
-  const cached = lsGet(LS_SEASONS_CACHE);
-  if (cached?.data?.ok && isFresh(cached, TTL.seasons)) return cached.data;
-  const res = await API.seasons();
-  if (res?.ok) lsSet(LS_SEASONS_CACHE, { ts: now(), data: res });
-  return res;
-}
-
-function pickSeasonId(seasonsRes) {
-  const seasons = seasonsRes?.seasons || [];
-  const current = seasonsRes?.currentSeasonId || seasons[0]?.seasonId || "";
-  const selected = localStorage.getItem(LS_SELECTED_SEASON) || "";
-  if (selected && seasons.some(s => s.seasonId === selected)) return selected;
-  if (current) return current;
-  return "";
+function pickSeasonIdFromLocalStorage() {
+  return localStorage.getItem(LS_SELECTED_SEASON) || "";
 }
 
 function uniqueSorted(arr) {
@@ -98,15 +86,8 @@ function prefetchMatchTab(seasonId) {
       .catch(() => {});
   }
 
-  // Past matches (page 1) - helps when user expands Past section
-  const pastCached = lsGet(pastKey(seasonId));
-  if (!pastCached?.matches || !isFresh(pastCached, TTL.past)) {
-    API.publicPastMatches(seasonId, 1, 20)
-      .then(res => {
-        if (res?.ok) lsSet(pastKey(seasonId), { ts: now(), ...res });
-      })
-      .catch(() => {});
-  }
+  // Past matches are intentionally NOT prefetched.
+  // They should only be loaded via the explicit "Refresh Past" button.
 }
 
 function prefetchLeaderboard(seasonId) {
@@ -122,19 +103,26 @@ function prefetchLeaderboard(seasonId) {
 
 // Prefetch ONCE at app load; does not block UI.
 export async function warmAppData() {
-  // Fire-and-forget tasks. The only awaited call is seasons (so we know seasonId).
-  prefetchPlayers();
+  // Per product requirement:
+  // - Avoid hitting APIs automatically on normal app loads and tab switches.
+  // - Only re-fetch in the background on a *browser reload*.
 
+  if (!isBrowserReload()) return;
+
+  // Per product requirement: re-fetch ONLY for the page the user reloaded.
+  // Do NOT warm other tabs (that can make it look like their cache was cleared).
   try {
-    const seasonsRes = await getSeasonsCachedOrFetch();
-    if (!seasonsRes?.ok) return;
-
-    const seasonId = pickSeasonId(seasonsRes);
+    const hash = window.location.hash || "#/match";
+    const path = hash.split("?")[0];
+    const seasonId = pickSeasonIdFromLocalStorage();
     if (!seasonId) return;
 
-    // Warm other tabs in background
-    prefetchMatchTab(seasonId);
-    prefetchLeaderboard(seasonId);
+    if (path === "#/match") {
+      prefetchMatchTab(seasonId);
+    } else if (path === "#/leaderboard") {
+      prefetchLeaderboard(seasonId);
+    }
+    // Admin: page logic handles reload-fetch itself.
   } catch {
     // ignore
   }
