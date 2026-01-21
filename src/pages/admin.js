@@ -1153,8 +1153,8 @@ function renderManageUI(root, data, routeToken, { fromCache, prevView } = { from
     lines.push(`ORANGE Captain: ${captainOrange}`);
     orange.forEach((p, i) => lines.push(`${i + 1}. ${p}`));
     lines.push("");
-    lines.push(`Blue Captain Link: ${captainLink(m.publicCode, captainBlue)}`);
-    lines.push(`Orange Captain Link: ${captainLink(m.publicCode, captainOrange)}`);
+    // lines.push(`Blue Captain Link: ${captainLink(m.publicCode, captainBlue)}`);
+    // lines.push(`Orange Captain Link: ${captainLink(m.publicCode, captainOrange)}`);
 
     waOpenPrefill(lines.join("\n"));
     toastInfo("WhatsApp opened.");
